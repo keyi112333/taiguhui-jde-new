@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# 文本文件（排除 requirements.txt）
+*.txt
+!requirements.txt
+
+*.json
+*.csv
+*.log
+
+# 运行时日志目录
+log_data/
