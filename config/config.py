@@ -39,6 +39,10 @@ class Config:
             for sheet, values in system_loader.config.items():
                 self._loader._config.setdefault(sheet, {})
                 self._loader._config[sheet] = {**values, **self._loader._config[sheet]}
+            # 多行配置（如登录配置）用户页有数据时优先，否则回落到系统配置。
+            for sheet, rows in system_loader._rows.items():
+                if not self._loader._rows.get(sheet):
+                    self._loader._rows[sheet] = rows
             self._system_config_source_path = system_path
 
         # 读取基础配置
@@ -86,6 +90,17 @@ class Config:
         if self._loader:
             return self._loader.get(key, default)
         return default
+
+    def get_rows(self, sheet_name: str) -> list:
+        """获取允许多行的配置页（如 登录配置），返回按首行标题组织的字典列表。"""
+        if self._loader:
+            return self._loader.get_rows(sheet_name)
+        return []
+
+    def set(self, key: str, value) -> None:
+        """覆盖配置项，格式为 "sheet名.配置项"；用于按账号切换本次运行参数。"""
+        if self._loader:
+            self._loader.set(key, value)
 
     def ensure_directories(self) -> None:
         """确保目录存在，并复制用户配置文件到配置目录"""

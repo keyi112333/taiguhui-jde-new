@@ -52,13 +52,15 @@ class PropertyTaxTests(unittest.TestCase):
         book.close()
 
     def test_reorders_columns_preserves_formulas_and_stops_before_comparison(self):
+        self.flow.export_ledger = lambda: self.root / "ledger.xlsx"
+        self.flow.export_r55gl1005 = lambda: None
         self.flow.run()
         context = self.flow.context
         self.assertEqual(context.get("property_tax_status"), "pending")
         self.assertIn("模块四", context.get("property_tax_pending_reason"))
         self.assertIsNone(context.get("journal_required"))
         path = context.get("property_tax_path")
-        self.assertEqual(path.name, "房产税计税表 001 2026-10.xlsx")
+        self.assertEqual(path.name, "房产税计税表 001 202610.xlsx")
         book = openpyxl.load_workbook(path)
         try:
             self.assertEqual(book["JDE明细账"]["H2"].value, 123.45)
@@ -71,11 +73,11 @@ class PropertyTaxTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             self.flow.create_template(self.root / "ledger.xlsx")
 
-    def test_missing_export_is_pending(self):
-        self.values.pop("明细账文件")
-        self.flow.run()
-        self.assertEqual(self.flow.context.get("property_tax_status"), "pending")
-        self.assertIsNone(self.flow.context.get("property_tax_path"))
+    def test_missing_export_company_rejected(self):
+        # 明细账导出始终执行：缺少自公司/至公司时明确报错，不再静默跳过。
+        with self.assertRaisesRegex(ConfigError, "模块二缺少导出参数"):
+            self.flow.run()
+        self.assertEqual(self.flow.context.get("property_tax_status"), "failed")
 
     def test_incomplete_mapping_rejected_without_output(self):
         self.values["标题映射"] = '{"不存在的科目": "帐号"}'
@@ -93,6 +95,8 @@ class PropertyTaxTests(unittest.TestCase):
         book.save(self.root / "ledger.xlsx")
         book.close()
         self.values["标题映射"] = '{"源账号": "帐号"}'
+        self.flow.export_ledger = lambda: self.root / "ledger.xlsx"
+        self.flow.export_r55gl1005 = lambda: None
         self.flow.run()
         self.assertEqual(self.flow.context.get("jde_ledger_mapping")["源账号"], "帐号")
 

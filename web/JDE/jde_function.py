@@ -198,6 +198,80 @@ def download_gl_movement(in_page,ledger_type,from_company,to_company,
     return target
 
 
+def _set_clipboard_text(text):
+    """把整块 TSV 写入系统剪贴板，供 JDE 网格 Ctrl+V 粘贴。"""
+    try:
+        import win32clipboard
+    except ImportError as exc:
+        raise RuntimeError(f"缺少 pywin32，无法写入剪贴板：{exc}") from exc
+    win32clipboard.OpenClipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
+def create_journal_entry(in_page, company, description, gl_date, rows,
+                         timeout=60000, discard=True):
+    """录入日记帐分录并返回 JDE 生成的批号。
+
+    rows 为 (帐号, 借项金额, 贷项金额, 备注) 序列，按 TSV 整块粘贴到第一个单元格，
+    行数随数据动态变化。discard=True 时按录制脚本两次取消（开发环境不允许保存）。
+    """
+    if not rows:
+        raise ValueError("分录没有可录入的数据行")
+    frame = in_page.frame_locator(MENU_IFRAME)
+    _enter_total_ledger(frame, timeout)
+    logger.info("打开日记帐分录")
+    _click_menu_link(in_page, "日记帐分录", timeout)
+
+    frame.get_by_role("button", name="增加 (Ctrl+Alt+A)").click(timeout=timeout)
+    frame.get_by_role("button", name="确定 (Ctrl+Alt+O)").click(timeout=timeout)
+
+    batch_box = frame.get_by_role("textbox", name="批号")
+    batch_box.wait_for(state="visible", timeout=timeout)
+    batch_box.click(timeout=timeout)
+    batch = batch_box.input_value(timeout=timeout)
+    logger.info(f"JDE 批号：{batch}")
+
+    frame.get_by_role("textbox", name="Document Company").fill(
+        str(company).strip(), timeout=timeout
+    )
+    frame.get_by_role("textbox", name="说明").fill(
+        str(description).strip(), timeout=timeout
+    )
+    frame.get_by_role("textbox", name="总帐日期").fill(
+        str(gl_date).strip(), timeout=timeout
+    )
+
+    lines = []
+    for code, debit, credit, remark in rows:
+        lines.append("\t".join("" if value is None else _cell_text(value)
+                               for value in (code, debit, credit, remark)))
+    _set_clipboard_text("\n".join(lines))
+    logger.info(f"分录数据已写入剪贴板：{len(lines)} 行")
+    frame.locator(".JSTextfield").first.click(timeout=timeout)
+    in_page.wait_for_timeout(500)
+    in_page.keyboard.press("Control+V")
+    in_page.wait_for_timeout(1000)
+
+    if discard:
+        # 正式环境开发不允许保存，按录制脚本取消两次退出。
+        for _ in range(2):
+            frame.get_by_role("button", name="取消 (Ctrl+Alt+L)").click(timeout=timeout)
+            in_page.wait_for_timeout(500)
+        logger.info("已取消分录录入（未保存）")
+    return batch
+
+
+def _cell_text(value):
+    """数值去掉多余小数位，避免粘贴时出现 1.146979552E7 之类的科学计数法。"""
+    if isinstance(value, float):
+        return format(value, "f").rstrip("0").rstrip(".")
+    return str(value)
+
+
 def _click_and_collect_download(in_page, link, timeout):
     """点击后会跳转页面触发下载；下载可能在原页面或新开页面中发起。"""
     context = in_page.context

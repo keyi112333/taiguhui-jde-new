@@ -2,6 +2,7 @@
 import calendar
 import json
 import re
+import time
 from copy import copy
 from datetime import date,datetime
 from pathlib import Path
@@ -13,7 +14,11 @@ from openpyxl.workbook.properties import CalcProperties
 from config.config_loader import ConfigError
 from log.loggingConfig import logger
 from utils.helpers import get_timestamp
-from web.JDE.jde_function import download_gl_movement, download_r55gl1005
+from web.JDE.jde_function import (
+    create_journal_entry,
+    download_gl_movement,
+    download_r55gl1005,
+)
 from workflows.jde_flow.template_update import (
     external_link_parts,
     restore_external_links,
@@ -84,6 +89,21 @@ def build_header_pairs(source_titles, target_titles, explicit_mapping=None):
 
 class PendingModule(Exception):
     """流程等待录制、数据或业务规则，不代表已完成。"""
+
+
+def set_accounting_period(sheet, value):
+    """把“会计期间：”右侧单元格更新为指定日期，返回该单元格坐标。"""
+    for row in sheet.iter_rows():
+        for cell in row:
+            if cell.value is not None and str(cell.value).strip() == "会计期间：":
+                target = sheet.cell(cell.row, cell.column + 1)
+                target.value = value
+                target.number_format = "yyyy/m/d"
+                logger.info(
+                    f"会计期间已更新为 {value:%Y/%m/%d}：{sheet.title}!{target.coordinate}"
+                )
+                return target.coordinate
+    raise ConfigError(f"{sheet.title} 未找到“会计期间：”单元格")
 
 def format_jde_date(value,label):
 
@@ -252,6 +272,154 @@ def write_template_with_openpyxl(template, destination, sheet_name,
             temp_path.unlink()
 
 
+
+# 内容整表重写的工作表：由 Excel 从报表整块覆盖，不纳入单元格差异。
+REWRITTEN_SHEETS = ("R55GL1005",)
+
+
+def collect_changes(reference, edited, skip=REWRITTEN_SHEETS):
+    """对比原始工作簿与计算稿，返回需要写入的单元格清单。"""
+    changes = []
+    for sheet in edited.worksheets:
+        if sheet.title in skip:
+            continue
+        origin = reference[sheet.title]
+        for row in sheet.iter_rows():
+            for cell in row:
+                if cell.value != origin[cell.coordinate].value:
+                    changes.append((sheet.title, cell.coordinate, cell.value))
+    return changes
+
+
+def label_row(sheet, label, column=2):
+    """返回某一列首次出现指定文字的所在行。"""
+    for row in range(1, sheet.max_row + 1):
+        if str(sheet.cell(row, column).value or "").strip() == label:
+            return row
+    return None
+
+
+def apply_with_excel(path, changes, engine="Excel.Application",
+                     report=None, defined_name=None, format_jobs=None):
+    """由 Excel 写入变更单元格并保存，模板属性（页眉页脚、样式表、定义名、图片）保持原样。
+
+    report=(文件, 工作表) 时，用该报表整块覆盖工作簿内的 R55GL1005 页；
+    format_jobs=[(工作表, 源行, [目标行...])] 用于沿用模板行的格式。
+    """
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError as exc:
+        raise ExcelUnavailable(f"缺少 pywin32：{exc}") from exc
+
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise ConfigError(f"待更新文件不存在：{path}")
+    pythoncom.CoInitialize()
+    app = book = report_book = None
+    try:
+        try:
+            app = win32com.client.DispatchEx(engine)
+        except Exception as exc:
+            raise ExcelUnavailable(f"无法启动 {engine}：{exc}") from exc
+        app.Visible = False
+        app.DisplayAlerts = False
+        app.AskToUpdateLinks = False
+        app.AutomationSecurity = 3
+
+        def open_book(filename, read_only):
+            # 新启的 Excel 实例偶发“Open 方法无效”，重试可覆盖启动竞态。
+            last = None
+            for _ in range(3):
+                try:
+                    return app.Workbooks.Open(
+                        str(filename), UpdateLinks=0, ReadOnly=read_only,
+                        IgnoreReadOnlyRecommended=True, AddToMru=False,
+                    )
+                except Exception as exc:
+                    last = exc
+                    time.sleep(1)
+            raise ExcelUnavailable(f"Excel 无法打开 {filename}：{last}")
+
+        book = open_book(path, False)
+        if book.ReadOnly:
+            raise ConfigError("生成文件被占用，无法保存更新结果")
+
+        if report:
+            report_path, report_sheet = report
+            report_book = open_book(report_path, True)
+            source = report_book.Worksheets(report_sheet)
+            target = book.Worksheets(REWRITTEN_SHEETS[0])
+            used = source.UsedRange
+            target.UsedRange.ClearContents()
+            used.Copy(target.Range(used.Address))
+            logger.info(f"已用报表覆盖工作表：{REWRITTEN_SHEETS[0]}（{used.Address}）")
+
+        for sheet_name, coordinate, value in changes:
+            cell = book.Worksheets(sheet_name).Range(coordinate)
+            if value is None:
+                cell.ClearContents()
+            elif isinstance(value, str) and value.startswith("="):
+                cell.Formula = value
+            elif isinstance(value, (datetime, date)):
+                # 直接给 pywintypes.Time 会按 UTC 处理、差 8 小时，改用 Excel 日期序列号。
+                moment = value if isinstance(value, datetime) else datetime(
+                    value.year, value.month, value.day)
+                cell.Value2 = (moment - datetime(1899, 12, 30)).total_seconds() / 86400
+            else:
+                cell.Value = value
+
+        for sheet_name, source_row, dest_rows in format_jobs or []:
+            sheet = book.Worksheets(sheet_name)
+            rows = [row for row in dest_rows if row != source_row]
+            if not rows:
+                continue
+            sheet.Rows(source_row).Copy()
+            for row in rows:
+                sheet.Rows(row).PasteSpecial(Paste=XL_PASTE_FORMATS)
+            app.CutCopyMode = False
+
+        if defined_name:
+            try:
+                book.Names(defined_name[0]).Delete()
+            except Exception:
+                pass
+            book.Names.Add(Name=defined_name[0], RefersTo="=" + str(defined_name[1]))
+            logger.info(f"已更新定义名：{defined_name[0]}")
+
+        app.CalculateFullRebuild()
+        book.Save()
+        logger.info(f"已由 {engine} 写入 {len(changes)} 个单元格并保存：{path}")
+    finally:
+        for workbook in (report_book, book):
+            if workbook is not None:
+                try:
+                    workbook.Close(SaveChanges=False)
+                except Exception:
+                    pass
+        if app is not None:
+            try:
+                app.Quit()
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
+
+
+def save_with_openpyxl(book, path, links):
+    """Excel 不可用时的降级保存：openpyxl 另存并回写外部链接部件。"""
+    temp_path = None
+    try:
+        with NamedTemporaryFile(dir=Path(path).parent, suffix=".xlsx", delete=False) as tmp:
+            temp_path = Path(tmp.name)
+        book.save(temp_path)
+        restore_external_links(temp_path, links)
+        temp_path.replace(path)
+        temp_path = None
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
 class PropertyTaxFlow:
     def __init__(self, context):
         self.context = context
@@ -260,14 +428,19 @@ class PropertyTaxFlow:
     def get(self, key, default=None):
         return self.config.get(f"房产税配置.{key}", default)
 
+    def accounting_period(self):
+        """会计期间首日：显式配置则用配置值，未配置按自然月（当月）。"""
+        first, _ = month_bounds(self.get("会计期间") or date.today())
+        return first
+
     def ledger_dates(self):
         """返回明细账起始和结束日期，优先使用配置项；未配置时按会计期间自然月计算。"""
         start = self.context.get("jde_ledger_start")
         end = self.context.get("jde_ledger_end")
         if start and end:
             return(format_jde_date(start, "明细账起始日期"), format_jde_date(end, "明细账至日期"))
-        # first, last = month_bounds(self.context.get("jde_ledger_period") or self.get("会计期间"))
-        first,last = month_bounds(self.context.get("jde_ledger_period") or date.today())
+        first, last = month_bounds(
+            self.context.get("jde_ledger_period") or self.get("会计期间") or date.today())
         return (format_jde_date(first, "明细账起始日期") if start else format_jde_date(first, "会计期间起始日期"),
                 format_jde_date(last, "明细账至日期") if end else format_jde_date(last, "会计期间结束日期"))
 
@@ -289,18 +462,18 @@ class PropertyTaxFlow:
             destination = Path(destination)
             if not destination.is_absolute():
                 destination = self.config.get_path("output") / destination
-            else:
-                destination =self.config.get_path("output") / f"房产税明细账 {get_timestamp()}"
-            path = download_gl_movement(
-                page,
-                ledger_type=self.get("明细账分类账类型", "AA"),
-                from_company=self.get("明细账自公司"),
-                to_company=self.get("明细账至公司"),
-                start_date=start_date,
-                end_date=end_date,
-                destination=destination,
-            )
-            self.context.set("jde_ledger_path", path)
+        else:
+            destination = self.config.get_path("output") / f"房产税明细账 {get_timestamp()}"
+        path = download_gl_movement(
+            page,
+            ledger_type=self.get("明细账分类账类型", "AA"),
+            from_company=self.get("明细账自公司"),
+            to_company=self.get("明细账至公司"),
+            start_date=start_date,
+            end_date=end_date,
+            destination=destination,
+        )
+        self.context.set("jde_ledger_path", path)
         return path
 
     def export_r55gl1005(self):
@@ -355,16 +528,20 @@ class PropertyTaxFlow:
             if len(candidates) != 1:
                 raise ConfigError("输入目录需有唯一包含‘房产税计税表’的 xlsx 模板，或配置 模板文件")
             template = candidates[0]
-        company, period = self.get("公司"), self.get("会计期间")
-        for label, value in (("公司", company), ("会计期间", period)):
-            if value is None or not str(value).strip() or re.search(r'[<>:"/\\|?*\x00-\x1f]', str(value)):
-                raise ConfigError(f"房产税配置.{label} 必填且不能包含文件名非法字符")
+        company = self.get("公司")
+        if company is None or not str(company).strip() or re.search(r'[<>:"/\\|?*\x00-\x1f]', str(company)):
+            raise ConfigError("房产税配置.公司 必填且不能包含文件名非法字符")
+        # 会计期间未配置时按自然月（当月），文件名统一用 yyyymm。
+        period = f"{self.accounting_period():%Y%m}"
         output_dir = Path(self.get("输出目录") or self.config.get_path("output"))
         if not output_dir.is_absolute():
             output_dir = self.config.get_path("output") / output_dir
         destination = output_dir / f"房产税计税表 {str(company).strip()} {str(period).strip()}.xlsx"
-        if destination.exists() or destination.resolve() in (template.resolve(), Path(ledger_path).resolve()):
-            raise ConfigError(f"输出文件已存在或与输入重合：{destination}")
+        if destination.resolve() in (template.resolve(), Path(ledger_path).resolve()):
+            raise ConfigError(f"输出文件不能与输入重合：{destination}")
+        if destination.exists():
+            destination.unlink()
+            logger.info(f"已覆盖同名更新表：{destination}")
         mapping = self.get("标题映射", "")
         try:
             mapping = json.loads(mapping) if mapping else {}
@@ -448,14 +625,18 @@ class PropertyTaxFlow:
                 target.close()
 
     def update_template(self, path):
-        """模块四：更新 BU 汇总；公式由 Excel 打开时重算。"""
+        """模块四：更新会计期间与底稿内容；openpyxl 只算内容，落盘交给 Excel。"""
         mode = self.get("收入科目匹配方式", "精确")
         if mode not in ("精确", "包含子科目"):
             raise ConfigError("收入科目匹配方式须为 精确 或 包含子科目")
+        reference = openpyxl.load_workbook(path)
         book = openpyxl.load_workbook(path)
         links = external_link_parts(path)
-        temp_path = None
         try:
+            sheet_name = self.get("计算底稿工作表", "房产税（从租）计算底稿")
+            if sheet_name not in book.sheetnames:
+                raise ConfigError(f"更新表缺少工作表：{sheet_name}")
+            set_accounting_period(book[sheet_name], date.today())
             report_path = self.context.get("jde_r55gl1005_path") or self.get("R55GL1005文件")
             if not report_path:
                 raise PendingModule("R55GL1005 导出待录制；请配置 房产税配置.R55GL1005文件，避免使用模板历史报表")
@@ -488,16 +669,35 @@ class PropertyTaxFlow:
                 report.close()
             records = update_workbook(book, include_children=mode == "包含子科目")
             book.calculation = CalcProperties(fullCalcOnLoad=True, forceFullCalc=True)
-            with NamedTemporaryFile(dir=Path(path).parent, suffix=".xlsx", delete=False) as tmp:
-                temp_path = Path(tmp.name)
-            book.save(temp_path)
-            restore_external_links(temp_path, links)
-            temp_path.replace(path)
+            blue = book.defined_names["蓝色"].attr_text if "蓝色" in book.defined_names else None
+            engine = str(self.get("重算引擎", "Excel.Application")).strip()
+            if engine.lower() == "openpyxl":
+                save_with_openpyxl(book, path, links)
+            else:
+                # 合计行可能上下移动：先搬合计行格式，再统一数据行格式。
+                format_jobs = []
+                old_total = label_row(reference[sheet_name], "合计")
+                new_total = label_row(book[sheet_name], "合计")
+                if old_total and new_total and old_total != new_total:
+                    format_jobs.append((sheet_name, old_total, [new_total]))
+                if new_total:
+                    format_jobs.append((sheet_name, 9, list(range(9, new_total))))
+                try:
+                    apply_with_excel(
+                        path,
+                        collect_changes(reference, book),
+                        engine=engine,
+                        report=(report_path, source_name),
+                        defined_name=("蓝色", blue) if blue else None,
+                        format_jobs=format_jobs,
+                    )
+                except ExcelUnavailable as exc:
+                    logger.warning(f"Excel 不可用，改用 openpyxl 直接保存：{exc}")
+                    save_with_openpyxl(book, path, links)
             self.context.set("property_tax_bu_totals", records)
         finally:
+            reference.close()
             book.close()
-            if temp_path and temp_path.exists():
-                temp_path.unlink()
 
     def compare_values(self, path):
         """模块五：重算并核对；是否写分录仍待业务规则确认。"""
@@ -522,11 +722,92 @@ class PropertyTaxFlow:
         except Exception:
             self.context.set("property_tax_check_status", "failed")
             raise
-        raise PendingModule("模板核对通过；是否进入 JDE 写入分录的规则待补充")
+        return True
+
+    def journal_rows(self, path):
+        """读取计算底稿 G-J（帐号/借项金额/贷项金额/备注），返回分录行与说明。"""
+        book = openpyxl.load_workbook(path, data_only=True)
+        try:
+            name = self.get("分录工作表", "房产税（从租）计算底稿")
+            if name not in book.sheetnames:
+                raise ConfigError(f"计算底稿缺少工作表：{name}")
+            sheet = book[name]
+            header_row, columns = None, {}
+            for row in range(1, min(sheet.max_row, 30) + 1):
+                found = {}
+                for cell in sheet[row]:
+                    title = normalize_header_name(cell.value)
+                    if title in ("帐号", "借项金额", "贷项金额", "备注"):
+                        found[title] = cell.column
+                if len(found) == 4:
+                    header_row, columns = row, found
+                    break
+            if header_row is None:
+                raise ConfigError("未在计算底稿中找到 帐号/借项金额/贷项金额/备注 标题行")
+            rows = []
+            for row in range(header_row + 1, sheet.max_row + 1):
+                code = sheet.cell(row, columns["帐号"]).value
+                if code is None or not str(code).strip():
+                    break
+                rows.append((
+                    str(code).strip(),
+                    sheet.cell(row, columns["借项金额"]).value,
+                    sheet.cell(row, columns["贷项金额"]).value,
+                    sheet.cell(row, columns["备注"]).value,
+                ))
+            if not rows:
+                raise ConfigError("计算底稿没有可录入的分录行")
+            return rows, str(rows[0][3]).strip()
+        finally:
+            book.close()
+
+    def write_batch_number(self, path, batch):
+        """把 JDE 批号回写到“批号：”右侧第一个单元格。"""
+        if not batch:
+            return
+        links = external_link_parts(path)
+        temp_path = None
+        book = openpyxl.load_workbook(path)
+        try:
+            name = self.get("分录工作表", "房产税（从租）计算底稿")
+            sheet = book[name]
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if cell.value is not None and str(cell.value).strip() == "批号：":
+                        sheet.cell(cell.row, cell.column + 1).value = batch
+                        book.calculation = CalcProperties(fullCalcOnLoad=True, forceFullCalc=True)
+                        with NamedTemporaryFile(dir=Path(path).parent, suffix=".xlsx",
+                                                delete=False) as tmp:
+                            temp_path = Path(tmp.name)
+                        book.save(temp_path)
+                        restore_external_links(temp_path, links)
+                        temp_path.replace(path)
+                        logger.info(f"JDE 批号 {batch} 已回写：{cell.coordinate}")
+                        return
+            raise ConfigError("计算底稿未找到“批号：”单元格")
+        finally:
+            book.close()
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink()
 
     def write_journal(self, path):
-        """模块六：待补充分录字段及 JDE 操作。"""
-        raise PendingModule("模块六待补充：JDE 分录写入操作")
+        """模块六：把计算底稿 G-J 整块粘贴录入 JDE 日记帐分录，并回写批号。"""
+        browser = self.context.get_browser("JDE")
+        page = browser.get_page() if browser else None
+        if page is None:
+            raise RuntimeError("JDE 浏览器未打开；请先登录 JDE")
+        rows, description = self.journal_rows(path)
+        batch = create_journal_entry(
+            page,
+            company=self.get("分录公司", "02501"),
+            description=description,
+            gl_date=format_jde_date(date.today(), "总帐日期"),
+            rows=rows,
+        )
+        self.context.set("jde_journal_batch", batch)
+        self.context.set("jde_journal_rows", len(rows))
+        self.write_batch_number(path, batch)
+        return batch
 
     def run(self):
         self.context.set("property_tax_status", "running")

@@ -12,9 +12,9 @@
 
 未传 --start/--end 时按自然月计算：
     传 --period 2026-10 → 该期间的自然月；
-    未传 --period     → 今天所在月份的自然月。
+    未传 --period     → 会计期间（Config.xlsx）的自然月，未配置会计期间则取今天所在月份。
 --period 只写入本次上下文 jde_ledger_period，不修改配置文件的 会计期间。
---accounting-period 用于输出模板名称及模板业务期间，与导出日期期间分开。
+--accounting-period 用于输出模板名称及模板业务期间，与导出日期期间分开；未传时按自然月。
 
 脚本登录后执行完整验证：
     明细账：选择页面 → 所有页面 → 总账页签 → 按科目帐的帐户查询
@@ -22,7 +22,8 @@
     R55GL1005：返回主页 → 选择页面 → 所有页面 → 总账页签
                → 中方科目总账 → 提交报表 → 下载 → 启用模板宏 → 转换 xlsx
     模板：复制模板 → 按标题写入明细账 → 复制 R55GL1005 工作表
-          → 更新模板其他底稿内容 → 重算并执行金额比对
+          → 更新会计期间与底稿内容 → compare_values 重算并比对金额
+          （新口径：通过返回 True，不通过抛 ConfigError）
 定位失败时去掉 --headless 重新运行，便于观察菜单与对话框状态。
 """
 import argparse
@@ -40,7 +41,7 @@ from log.loggingConfig import logger
 from utils.helpers import get_timestamp
 from web.browser import BrowserManager
 from workflows.jde_flow.login_task import JDELoginTask
-from workflows.jde_flow.property_tax import PendingModule, PropertyTaxFlow
+from workflows.jde_flow.property_tax import PropertyTaxFlow
 
 
 def _as_bool(value):
@@ -68,14 +69,14 @@ def main():
     parser.add_argument("--from-company", help="自公司，例如 02501")
     parser.add_argument("--to-company", help="至公司，例如 02504")
     parser.add_argument("--period", help="导出日期期间，支持 2026-10 / 2026/10 / 202610 / 2026年10月；"
-                                        "未传 --start/--end 时用于计算自然月，缺省取当前月")
+                                        "未传 --start/--end 时用于计算自然月，缺省取会计期间或当前月")
     parser.add_argument("--start", help="起始日期，可选，例如 2026-10-01")
     parser.add_argument("--end", help="至日期，可选，例如 2026-10-31")
-    parser.add_argument("--file", help="下载文件名或相对输出目录的路径；默认按时间戳生成")
-    parser.add_argument("--r55gl1005-file", help="R55GL1005 输出文件名或输入目录相对路径")
+    parser.add_argument("--file", help="下载文件名、相对输出目录路径或绝对路径；默认按时间戳生成")
+    parser.add_argument("--r55gl1005-file", help="R55GL1005 输出文件名或路径")
     parser.add_argument("--template", help="房产税模板文件名或路径；默认读取 Config.xlsx")
     parser.add_argument("--company", help="模板输出名称使用的公司；默认读取 Config.xlsx")
-    parser.add_argument("--accounting-period", help="模板业务会计期间；默认读取 Config.xlsx")
+    parser.add_argument("--accounting-period", help="模板业务会计期间；未传时按自然月（当月）")
     parser.add_argument("--headless", action="store_true", help="无界面运行")
     args = parser.parse_args()
 
@@ -84,29 +85,24 @@ def main():
     config.ensure_directories()
 
     # 命令行参数只覆盖本次运行，不写回配置工作簿。
-    overrides = {"JDE配置": {"jde_credential_name": args.credential_name}}
-    overrides["房产税配置"] = {
-        "明细账分类账类型": args.ledger_type,
-        "明细账自公司": args.from_company,
-        "明细账至公司": args.to_company,
-        "明细账文件": args.file,
-        "R55GL1005文件": args.r55gl1005_file,
-        "模板文件": args.template,
-        "公司": args.company,
-        "会计期间": args.accounting_period,
+    overrides = {
+        "JDE配置.jde_credential_name": args.credential_name,
+        "房产税配置.明细账分类账类型": args.ledger_type,
+        "房产税配置.明细账自公司": args.from_company,
+        "房产税配置.明细账至公司": args.to_company,
+        "房产税配置.明细账文件": args.file,
+        "房产税配置.R55GL1005文件": args.r55gl1005_file,
+        "房产税配置.模板文件": args.template,
+        "房产税配置.公司": args.company,
+        "房产税配置.会计期间": args.accounting_period,
     }
-    for sheet, values in overrides.items():
-        for key, value in values.items():
-            if value:
-                config._loader._config.setdefault(sheet, {})[key] = value
+    for key, value in overrides.items():
+        if value:
+            config.set(key, value)
 
-    # 当前 export_ledger 仅在配置了文件名时才执行下载，未指定时给一个默认值。
-    # 该限制与界面流程无关：选择页面/所有页面/总账页签都在 download_gl_movement 内完成。
+    # 未指定明细账文件名时按时间戳生成（支持绝对路径，写入指定目录）。
     if not config.get("房产税配置.明细账文件"):
-        config._loader._config.setdefault("房产税配置", {})[
-            "明细账文件"] = f"JDE明细账 {get_timestamp()}.xlsx"
-    elif Path(str(config.get("房产税配置.明细账文件"))).is_absolute():
-        raise SystemExit("明细账文件目前只支持文件名或相对输出目录的路径；绝对路径会被 export_ledger 忽略")
+        config.set("房产税配置.明细账文件", f"JDE明细账 {get_timestamp()}.xlsx")
 
     if not config.get("JDE配置.jde_credential_name"):
         raise SystemExit("缺少 JDE配置.jde_credential_name：请填写 Config.xlsx 或传入 --credential-name")
@@ -150,10 +146,15 @@ def main():
             start_date, end_date = flow.ledger_dates()
         except Exception as exc:
             raise SystemExit(f"无法确定导出期间：{exc}")
+        period_first = flow.accounting_period()
+        logger.info(f"会计期间：{period_first:%Y-%m}（{period_first:%Y%m}）；"
+                    f"未配置 房产税配置.会计期间 时按自然月")
         if args.start and args.end:
             date_source = "显式 --start/--end"
         elif args.period:
             date_source = f"--period {args.period}"
+        elif config.get("房产税配置.会计期间"):
+            date_source = f"房产税配置.会计期间 {config.get('房产税配置.会计期间')}"
         else:
             date_source = "当前月"
         logger.info(f"查询条件：分类账类型 {config.get('房产税配置.明细账分类账类型', 'AA')}，"
@@ -198,18 +199,15 @@ def main():
         )
 
         flow.update_template(template_path)
-        logger.info(f"R55GL1005 工作表已写入，模板其他底稿内容已更新：{template_path}")
+        logger.info(f"会计期间与底稿内容已更新：{template_path}")
         logger.info(
             f"重算前模板文件检查：存在={Path(template_path).is_file()}，"
             f"大小={Path(template_path).stat().st_size if Path(template_path).is_file() else 0} 字节"
         )
 
-        try:
-            flow.compare_values(template_path)
-        except PendingModule as exc:
-            if context.get("property_tax_check_status") != "passed":
-                raise
-            logger.info(str(exc))
+        # 重算走 compare_values 新口径：内部完成重算，通过返回 True，不通过抛 ConfigError。
+        if flow.compare_values(template_path) is not True:
+            raise SystemExit("模板金额比对未返回通过")
 
         check_status = context.get("property_tax_check_status")
         if check_status != "passed":
@@ -218,6 +216,7 @@ def main():
         check_report = context.get("property_tax_check_report")
         logger.info(f"模板金额比对通过：{len(results)} 项，结果报告：{check_report}")
         print(f"更新后模板：{template_path}")
+        print(f"会计期间：{period_first:%Y-%m}")
         print(f"金额比对状态：{check_status}")
         print(f"金额比对报告：{check_report}")
     finally:

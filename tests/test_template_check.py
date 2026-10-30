@@ -110,7 +110,7 @@ class TemplateCheckTests(unittest.TestCase):
             self.assertEqual(book["XDO_METADATA"].cell(2, 3).value, "Version")
 
     @patch("workflows.jde_flow.property_tax.recalculate_file")
-    def test_failure_saved_and_pass_does_not_authorize_journal(self, recalc):
+    def test_failure_saved_and_pass_returns_true(self, recalc):
         book, sheet = self.sheet(2)
         context = TaskContext()
         class Config:
@@ -121,8 +121,8 @@ class TemplateCheckTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             path = Path(folder) / "output.xlsx"
             book.save(path)
-            with self.assertRaisesRegex(PendingModule, "核对通过"):
-                flow.compare_values(path)
+            # 新口径：核对通过返回 True，不再抛 PendingModule。
+            self.assertTrue(flow.compare_values(path))
             self.assertEqual(context.get("property_tax_check_status"), "passed")
             self.assertIsNone(context.get("journal_required"))
             sheet["H8"] = 23
