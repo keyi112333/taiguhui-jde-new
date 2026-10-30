@@ -1,6 +1,6 @@
 #执行前提：更新表金额核对通过，且在重算阶段需要将房产税（从租）计算底稿中的G-J的表格（具体可以看模板文件）的账号、借项金额、贷项金额、备注这几列下的值（不要标题）存为可复制黏贴的excel表格格式（行数是动态的，要人工操作的从1excel文件复制然后再黏贴）
 
-
+page.get_by_title("主页").click()
 page.locator("iframe[name=\"elmenuAppIframe\"]").content_frame.locator("#tabBar").get_by_text("总帐").click()
 page.get_by_role("link", name="日记帐分录").click()    #直接复用另外两个页面总帐选择页面点击页面的操作
 page.locator("iframe[name=\"elmenuAppIframe\"]").content_frame.get_by_role("button", name="增加 (Ctrl+Alt+A)").click()
