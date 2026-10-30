@@ -138,12 +138,13 @@ class PrepareTests(unittest.TestCase):
     @patch("workflows.jde_flow.main_task.read_windows_credential",
            return_value=("test", "secret"))
     def test_prepare_defaults_to_natural_month(self, credential):
-        task = self.build({"房产税配置.会计期间": None})
         from datetime import date
-        info = task.prepare({"window凭据": "JDE_TEST", "凭据账号": "test",
-                             "共享盘路径": str(self.shared)})
-        self.assertEqual(info["data_dir"].name,
-                         f"太古汇 2501 {date.today():%Y%m}")
+        for blank in (None, "", "   "):
+            task = self.build({"房产税配置.会计期间": blank})
+            info = task.prepare({"window凭据": "JDE_TEST", "凭据账号": "test",
+                                 "共享盘路径": str(self.shared)})
+            self.assertEqual(info["data_dir"].name,
+                             f"太古汇 2501 {date.today():%Y%m}")
 
     def test_prepare_rejects_missing_columns_and_template(self):
         task = self.build()

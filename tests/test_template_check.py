@@ -130,5 +130,5 @@ class TemplateCheckTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "核对失败"):
                 flow.compare_values(path)
             self.assertEqual(context.get("property_tax_check_status"), "failed")
-            self.assertTrue(context.get("property_tax_check_report").is_file())
+            self.assertFalse(Path(path).with_suffix(".核对结果.json").exists())
             self.assertEqual(recalc.call_count, 2)

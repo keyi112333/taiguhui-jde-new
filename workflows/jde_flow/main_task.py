@@ -1,6 +1,5 @@
 """按「登录配置」逐行运行：每行一个账号+共享盘目录，完整跑一遍流程。"""
 
-from datetime import date
 from pathlib import Path
 
 from config.config_loader import ConfigError
@@ -11,7 +10,7 @@ from utils.credentials import read_windows_credential
 from utils.helpers import get_timestamp
 from web.browser import BrowserManager
 from workflows.jde_flow.login_task import JDELoginTask
-from workflows.jde_flow.property_tax import PropertyTaxFlow, month_bounds
+from workflows.jde_flow.property_tax import PropertyTaxFlow, configured_period, month_bounds
 
 
 RUN_SHEET = "登录配置"
@@ -91,7 +90,7 @@ class JDEMainTask(TaskBase):
             )
 
         period_value = config.get("房产税配置.会计期间")
-        first_day, _ = month_bounds(period_value or date.today())
+        first_day, _ = month_bounds(configured_period(period_value))
         period = f"{first_day:%Y%m}"
         company = code.zfill(5)
         stamp = get_timestamp()

@@ -10,6 +10,8 @@ from log.loggingConfig import logger
 from utils.helpers import ensure_dir,get_timestamp
 
 MENU_IFRAME = 'iframe[name="e1menuAppIframe"]'
+# 日记帐分录录入前需要选中的分录方案（JDE #gtab0_1 下拉值）。
+JOURNAL_SCHEME_OPTION = "8d5afde055f149ea973fb07587dafa28"
 
 OUTPUT_LINK_NAME = "可单击图标 查看输出"
 JOB_FILTER_NAME = "作业"
@@ -212,15 +214,49 @@ def _set_clipboard_text(text):
         win32clipboard.CloseClipboard()
 
 
+def _focus_journal_grid(frame, in_page, timeout):
+    """把焦点移到分录网格首格。
+
+    表头字段（批号/公司/说明/日期）与网格单元都用 .JSTextfield，
+    直接点第一个会把焦点留在日期栏，粘贴就会写进日期。这里只认
+    “网格行内的输入框”获得焦点，确认不了就抛错，绝不盲目粘贴。
+    """
+    focused_selector = "tr[id] input.JSTextfield:focus"
+    for selector in ("tr[id^='G0_'] input.JSTextfield", "#G0_1 input.JSTextfield"):
+        cells = frame.locator(selector)
+        if cells.count() == 0:
+            continue
+        cells.first.click(timeout=timeout)
+        in_page.wait_for_timeout(300)
+        if frame.locator(focused_selector).count() > 0:
+            logger.info(f"焦点已移到分录网格：{selector}")
+            return
+    # 网格 id 不确定时，用 Tab 顺序进入网格，每步校验焦点。
+    for _ in range(12):
+        in_page.keyboard.press("Tab")
+        in_page.wait_for_timeout(200)
+        if frame.locator(focused_selector).count() > 0:
+            logger.info("已用 Tab 把焦点移入分录网格")
+            return
+    raise RuntimeError("未能把焦点移到分录网格，已跳过粘贴，避免写入日期栏")
+
+
 def create_journal_entry(in_page, company, description, gl_date, rows,
+                         scheme_option=JOURNAL_SCHEME_OPTION,
                          timeout=60000, discard=True):
     """录入日记帐分录并返回 JDE 生成的批号。
 
     rows 为 (帐号, 借项金额, 贷项金额, 备注) 序列，按 TSV 整块粘贴到第一个单元格，
-    行数随数据动态变化。discard=True 时按录制脚本两次取消（开发环境不允许保存）。
+    行数随数据动态变化；粘贴前先在下拉框选中分录方案。
+    discard=True 时按录制脚本两次取消（开发环境不允许保存）。
     """
     if not rows:
         raise ValueError("分录没有可录入的数据行")
+    # 先回主页，再重选页面进入总帐，避免停留在上一模块的页面状态。
+    home = in_page.get_by_title("主页")
+    home.wait_for(state="visible", timeout=timeout)
+    home.click()
+    logger.info("已返回主页，重新选择页面并进入总帐")
     frame = in_page.frame_locator(MENU_IFRAME)
     _enter_total_ledger(frame, timeout)
     logger.info("打开日记帐分录")
@@ -251,8 +287,13 @@ def create_journal_entry(in_page, company, description, gl_date, rows,
                                for value in (code, debit, credit, remark)))
     _set_clipboard_text("\n".join(lines))
     logger.info(f"分录数据已写入剪贴板：{len(lines)} 行")
-    frame.locator(".JSTextfield").first.click(timeout=timeout)
-    in_page.wait_for_timeout(500)
+    # 粘贴前先选好分录方案，否则网格不接受整块粘贴；选完等网格重绘。
+    scheme = frame.locator("#gtab0_1")
+    scheme.wait_for(state="visible", timeout=timeout)
+    scheme.select_option(scheme_option, timeout=timeout)
+    logger.info(f"已选择分录方案：{scheme_option}")
+    in_page.wait_for_timeout(1000)
+    _focus_journal_grid(frame, in_page, timeout)
     in_page.keyboard.press("Control+V")
     in_page.wait_for_timeout(1000)
 

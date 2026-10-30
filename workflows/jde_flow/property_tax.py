@@ -117,6 +117,12 @@ def format_jde_date(value,label):
             continue
     raise ConfigError(f"{label} 日期格式不正确，应为 YYYY-MM-DD 或 MM/DD/YYYY 等可识别格式；当前值：{text}")
 
+def configured_period(value):
+    """会计期间配置值；空白（含只有空格）视为未配置，按自然月返回今天。"""
+    text = "" if value is None else str(value).strip()
+    return text or date.today()
+
+
 def month_bounds(period):
     """会计期间自然月第一天和最后一天"""
     if isinstance(period, (datetime,date)):
@@ -429,8 +435,8 @@ class PropertyTaxFlow:
         return self.config.get(f"房产税配置.{key}", default)
 
     def accounting_period(self):
-        """会计期间首日：显式配置则用配置值，未配置按自然月（当月）。"""
-        first, _ = month_bounds(self.get("会计期间") or date.today())
+        """会计期间首日：显式配置则用配置值，空白按自然月（当月）。"""
+        first, _ = month_bounds(configured_period(self.get("会计期间")))
         return first
 
     def ledger_dates(self):
@@ -439,8 +445,10 @@ class PropertyTaxFlow:
         end = self.context.get("jde_ledger_end")
         if start and end:
             return(format_jde_date(start, "明细账起始日期"), format_jde_date(end, "明细账至日期"))
-        first, last = month_bounds(
-            self.context.get("jde_ledger_period") or self.get("会计期间") or date.today())
+        value = self.context.get("jde_ledger_period")
+        if not str(value or "").strip():
+            value = self.get("会计期间")
+        first, last = month_bounds(configured_period(value))
         return (format_jde_date(first, "明细账起始日期") if start else format_jde_date(first, "会计期间起始日期"),
                 format_jde_date(last, "明细账至日期") if end else format_jde_date(last, "会计期间结束日期"))
 
@@ -714,11 +722,15 @@ class PropertyTaxFlow:
             passed = all(item["通过"] for item in results)
             self.context.set("property_tax_check_results", results)
             self.context.set("property_tax_check_status", "passed" if passed else "failed")
-            report = Path(path).with_suffix(".核对结果.json")
-            report.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-            self.context.set("property_tax_check_report", report)
+            for item in results:
+                logger.info(
+                    f"[{'通过' if item['通过'] else '不通过'}] {item['核对项']}："
+                    f"左={item['左值']} 右={item['右值']} "
+                    f"差额={item['差额']} 容差={item['容差']}"
+                )
             if not passed:
-                raise ConfigError("模板核对失败，详见核对结果：" + str(report))
+                failed = "、".join(item["核对项"] for item in results if not item["通过"])
+                raise ConfigError(f"模板核对失败：{failed}")
         except Exception:
             self.context.set("property_tax_check_status", "failed")
             raise

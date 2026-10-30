@@ -12,6 +12,7 @@ page.locator("iframe[name=\"elmenuAppIframe\"]").content_frame.get_by_role("text
 page.locator("iframe[name=\"elmenuAppIframe\"]").content_frame.get_by_role("textbox", name="说明").fill("计提2026年9月从租房产税")   #读取更新表格
 page.locator("iframe[name=\"elmenuAppIframe\"]").content_frame.get_by_role("textbox", name="总帐日期").click()
 page.locator("iframe[name=\"elmenuAppIframe\"]").content_frame.get_by_role("textbox", name="总帐日期").fill("10/29/2026")  #运行当天的实时日期
+page.locator("iframe[name=\"e1menuAppIframe\"]").content_frame.locator("#gtab0_1").select_option("8d5afde055f149ea973fb07587dafa28")
 page.locator("iframe[name=\"elmenuAppIframe\"]").content_frame.locator(".JSTextfield").first.click()   #这个是第一个单元格，点击后黏贴我们前面提到的房产税（从租）计算底稿中的G-J的表格数据
 
 page.locator("iframe[name=\"elmenuAppIframe\"]").content_frame.get_by_role("button", name="取消 (Ctrl+Alt+L)").click()

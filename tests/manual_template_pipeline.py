@@ -8,7 +8,6 @@ R55GL1005 若给的是 .xls，会先按线上流程转成 .xlsx（优先复用�
     python tests/manual_template_pipeline.py --ledger "data/JDE流程/03_输出/JDE明细账 20261029_092539.xlsx"
 """
 import argparse
-import json
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -161,13 +160,10 @@ def main():
 
     status = context.get("property_tax_check_status")
     results = context.get("property_tax_check_results") or []
-    report_path = context.get("property_tax_check_report")
     for item in results:
         flag = "通过" if item["通过"] else "不通过"
-        print(f"  [{flag}] {item['核对项']}：左={item['左值']} 右={item['右值']} 差额={item['差额']}")
-    if report_path:
-        print(f"  核对结果：{report_path}")
-        print(json.dumps(results, ensure_ascii=False, indent=2))
+        print(f"  [{flag}] {item['核对项']}：左={item['左值']} 右={item['右值']} "
+              f"差额={item['差额']} 容差={item['容差']}")
 
     print(f"\n金额比对状态：{status}")
     if status != "passed":

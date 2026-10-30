@@ -213,12 +213,12 @@ def main():
         if check_status != "passed":
             raise SystemExit(f"模板金额比对未通过或未完成，状态：{check_status}")
         results = context.get("property_tax_check_results") or []
-        check_report = context.get("property_tax_check_report")
-        logger.info(f"模板金额比对通过：{len(results)} 项，结果报告：{check_report}")
+        logger.info(f"模板金额比对通过：{len(results)} 项（详见日志中的逐项结果）")
         print(f"更新后模板：{template_path}")
         print(f"会计期间：{period_first:%Y-%m}")
         print(f"金额比对状态：{check_status}")
-        print(f"金额比对报告：{check_report}")
+        for item in results:
+            print(f"  [通过] {item['核对项']}：差额={item['差额']} 容差={item['容差']}")
     finally:
         context.close_all_browsers()
 
