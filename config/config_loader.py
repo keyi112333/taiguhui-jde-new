@@ -92,3 +92,8 @@ class ConfigLoader:
     @property
     def config(self) -> Dict[str, Any]:
         return self._config.copy()
+
+    @property
+    def sheet_names(self) -> list:
+        """已加载的工作表名称，用于遍历 WechatRobot1、WechatRobot2 等通知配置页。"""
+        return list(self._config)

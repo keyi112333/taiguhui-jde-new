@@ -1,5 +1,6 @@
 """按「登录配置」逐行运行：每行一个账号+共享盘目录，完整跑一遍流程。"""
 
+from datetime import datetime
 from pathlib import Path
 
 from config.config_loader import ConfigError
@@ -11,6 +12,12 @@ from utils.helpers import get_timestamp
 from web.browser import BrowserManager
 from workflows.jde_flow.login_task import JDELoginTask
 from workflows.jde_flow.property_tax import PropertyTaxFlow, configured_period, month_bounds
+from workflows.jde_flow.run_report import (
+    RESULT_FILE_TEMPLATE,
+    append_run_result,
+    build_notification_message,
+    notify_wechat_robots,
+)
 
 
 RUN_SHEET = "登录配置"
@@ -53,19 +60,101 @@ class JDEMainTask(TaskBase):
                 f"{RUN_SHEET} 页没有数据行，请填写 "
                 f"{'、'.join(REQUIRED_COLUMNS)}；每行会完整跑一遍流程"
             )
+        period = self.period_label()
         failures = []
+        records = []
+        result_file = None
         for index, run in enumerate(runs, 1):
             label = f"[{index}/{len(runs)}] {run.get('共享盘路径')}"
             logger.info(f"开始执行 {label}")
+            started = datetime.now()
+            info = {}
+            batch = ""
+            result, error = "成功", ""
+            self.context.set("property_tax_status", None)
+            self.context.set("property_tax_pending_reason", None)
+            self.context.set("jde_journal_batch", None)
             try:
-                self.run_one(run)
-                logger.info(f"{label} 执行完成")
+                info = self.prepare(run)
+                self.run_one(run, info)
+                status = self.context.get("property_tax_status")
+                if status == "pending":
+                    result = "待补运行"
+                    error = str(self.context.get("property_tax_pending_reason") or "")
+                    logger.warning(f"{label} 待补运行：{error}")
+                elif status not in (None, "completed"):
+                    result = "失败"
+                    error = str(self.context.get("property_tax_pending_reason") or "")
+                    failures.append(f"{label}：{error}")
+                    logger.error(f"{label} 执行失败：{error}")
+                else:
+                    logger.info(f"{label} 执行完成")
+                batch = self.context.get("jde_journal_batch") or ""
             except Exception as exc:
+                result, error = "失败", str(exc)
                 logger.exception(f"{label} 执行失败：{exc}")
                 failures.append(f"{label}：{exc}")
+            finally:
+                short_name, company = self._run_identity(run)
+                record = {
+                    "会计期间": period,
+                    "公司": info.get("short_name") or short_name,
+                    "公司代码": info.get("company") or company,
+                    "分录批号": batch,
+                    "运行结果": result,
+                    "异常情况": error,
+                    "运行开始时间": started,
+                    "运行结束时间": datetime.now(),
+                }
+                records.append(record)
+                try:
+                    result_file = append_run_result(config, record) or result_file
+                except Exception as exc:
+                    logger.warning(f"运行结果表写入失败：{exc}")
+        self._notify(config, period, records, result_file)
         if failures:
             raise ConfigError("以下账号执行失败：" + "；".join(failures))
         return True
+
+    def period_label(self):
+        """本次运行的会计期间（YYYYMM），未配置时按自然月。"""
+        first, _ = month_bounds(
+            configured_period(self.context.config.get("房产税配置.会计期间"))
+        )
+        return f"{first:%Y%m}"
+
+    @staticmethod
+    def _run_identity(run):
+        """从共享盘路径解析公司简称与代码；解析失败时保留原始路径便于排查。"""
+        try:
+            _, short_name, code = parse_shared_path(str(run.get("共享盘路径") or ""))
+            return short_name, code.zfill(5)
+        except Exception:
+            return str(run.get("共享盘路径") or ""), ""
+
+    def _notify(self, config, period, records, result_file):
+        total = len(records)
+        success = sum(1 for record in records if record.get("运行结果") == "成功")
+        failed = total - success
+        companies = []
+        for record in records:
+            name = str(record.get("公司") or "").strip()
+            if name and name not in companies:
+                companies.append(name)
+        company = "、".join(companies) or str(
+            config.get("房产税配置.公司", "") or "太古汇"
+        )
+        filename = (
+            Path(result_file).name if result_file
+            else RESULT_FILE_TEMPLATE.format(year=datetime.now().year)
+        )
+        message = build_notification_message(
+            company, period, total, success, failed, filename
+        )
+        try:
+            notify_wechat_robots(config, message, result_file)
+        except Exception as exc:
+            logger.warning(f"企业微信通知失败：{exc}")
 
     def prepare(self, run):
         """校验本行配置并把公司代码、路径写入房产税配置，返回本次运行信息。"""
@@ -119,13 +208,14 @@ class JDEMainTask(TaskBase):
             "credential": values["window凭据"],
             "company": company,
             "short_name": short_name,
+            "period": period,
             "shared_path": shared_path,
             "template": template,
             "data_dir": data_dir,
         }
 
-    def run_one(self, run):
-        info = self.prepare(run)
+    def run_one(self, run, info=None):
+        info = info or self.prepare(run)
         config = self.context.config
         browser = BrowserManager(headless=read_headless(config.get("JDE配置.headless", False)))
         self.context.set_browser("JDE", browser)
