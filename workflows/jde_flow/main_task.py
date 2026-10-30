@@ -7,7 +7,7 @@ from config.config_loader import ConfigError
 from core.context import TaskContext
 from core.task_base import TaskBase
 from log.loggingConfig import logger
-from utils.credentials import read_windows_credential
+from utils.credentials import CredentialNotFoundError, read_windows_credential
 from utils.helpers import get_timestamp
 from web.browser import BrowserManager
 from workflows.jde_flow.login_task import JDELoginTask
@@ -22,6 +22,10 @@ from workflows.jde_flow.run_report import (
 
 RUN_SHEET = "登录配置"
 REQUIRED_COLUMNS = ("window凭据", "凭据账号", "共享盘路径")
+
+
+class SkipRun(Exception):
+    """当前行凭据未配置，跳过该行且不计入失败。"""
 
 
 def parse_shared_path(value):
@@ -90,6 +94,9 @@ class JDEMainTask(TaskBase):
                 else:
                     logger.info(f"{label} 执行完成")
                 batch = self.context.get("jde_journal_batch") or ""
+            except SkipRun as exc:
+                result, error = "跳过", str(exc)
+                logger.warning(f"{label} 跳过：{exc}")
             except Exception as exc:
                 result, error = "失败", str(exc)
                 logger.exception(f"{label} 执行失败：{exc}")
@@ -133,7 +140,8 @@ class JDEMainTask(TaskBase):
             return str(run.get("共享盘路径") or ""), ""
 
     def _notify(self, config, period, records, result_file):
-        total = len(records)
+        skipped = sum(1 for record in records if record.get("运行结果") == "跳过")
+        total = len(records) - skipped
         success = sum(1 for record in records if record.get("运行结果") == "成功")
         failed = total - success
         companies = []
@@ -171,7 +179,10 @@ class JDEMainTask(TaskBase):
         if not template.is_file():
             raise ConfigError(f"共享盘缺少模板：{template}")
 
-        username, _ = read_windows_credential(values["window凭据"])
+        try:
+            username, _ = read_windows_credential(values["window凭据"])
+        except CredentialNotFoundError:
+            raise SkipRun(f"Windows 凭据 {values['window凭据']} 不存在，已跳过") from None
         if username.split("\\")[-1].strip().lower() != values["凭据账号"].lower():
             logger.warning(
                 f"Windows 凭据 {values['window凭据']} 的用户名 {username} "
