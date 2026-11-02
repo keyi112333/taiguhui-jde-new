@@ -315,20 +315,29 @@ def _position_header_labels(frame, in_page):
         return []
     boxes = []
     for name in JOURNAL_COLUMNS:
-        locator = frame.get_by_text(name)
-        found = []
-        for index in range(min(locator.count(), 20)):
+        # 允许表头文字中间夹空格或换行（如“借 项 金 额”）。
+        pattern = re.compile(r"\s*".join(re.escape(part) for part in name))
+        locator = frame.get_by_text(pattern)
+        exact, loose = [], []
+        for index in range(min(locator.count(), 50)):
             item = locator.nth(index)
             try:
                 if not item.is_visible():
                     continue
+                text = _normalize_label(item.inner_text())
                 box = item.bounding_box()
             except Exception:
                 continue
             if not box or box["width"] <= 0 or box["height"] <= 0:
                 continue
-            if box["y"] + box["height"] <= anchor["y"] + 2:
-                found.append(box)
+            if box["y"] + box["height"] > anchor["y"] + 2:
+                continue
+            entry = (box, box["width"] * box["height"])
+            if text == name:
+                exact.append(entry)
+            elif name in text:
+                loose.append(entry)
+        found = [box for box, _ in (exact or loose)]
         if not found:
             return []
         found.sort(key=lambda box: box["y"] + box["height"])
@@ -415,7 +424,10 @@ def _verify_journal_columns(frame, in_page, timeout):
             pass
     labels = _journal_header_labels(frame, in_page)
     if not labels:
-        logger.warning("无法读取日记帐分录网格表头，改为粘贴后校验首行数据")
+        logger.warning(
+            "无法读取日记帐分录网格表头，改为粘贴后校验首行数据；"
+            f"首输入框属性={_grid_input_probe(frame)}"
+        )
         return False
     width = len(JOURNAL_COLUMNS)
     matched = any(
@@ -441,6 +453,20 @@ def _grid_inputs(frame):
     if inputs.count() < 4:
         inputs = frame.locator("tr[id^='G0_'] input.JSTextfield")
     return inputs
+
+
+def _grid_input_probe(frame):
+    """记录首输入框属性，便于表头读取失败时排查 DOM。"""
+    inputs = _grid_inputs(frame)
+    if inputs.count() == 0:
+        return {}
+    try:
+        return inputs.first.evaluate(
+            "el => ({id: el.id, name: el.name, aria: el.getAttribute('aria-label'),"
+            " title: el.title, cls: el.className})"
+        )
+    except Exception:
+        return {}
 
 
 def _input_attribute_labels(frame):
@@ -537,7 +563,8 @@ def _row_matches(actual, expected):
 
 def _verify_pasted_row(frame, in_page, row, timeout):
     """表头读不到时，按粘贴后首行前 4 列的值确认列位置。"""
-    expected = [_cell_text(value) for value in row]
+    # 与粘贴 TSV 保持一致：空值写空字符串，而不是 "None"。
+    expected = ["" if value is None else _cell_text(value) for value in row]
     account = expected[0].strip()
     deadline = time.monotonic() + min(timeout / 1000, 10)
     actual = []
