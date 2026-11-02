@@ -50,7 +50,8 @@ def _quarter(period):
     return year, first, first + 2
 
 
-def _calc_buses(calc):
+def _calc_bus_rows(calc):
+    """返回申报 BU 顺序及每个 BU 在计算底稿中的行号。"""
     header = _find_cell(calc, "BU")
     if header is None:
         raise ConfigError(f"{calc.title} 未找到 BU 表头")
@@ -58,17 +59,26 @@ def _calc_buses(calc):
         total = _total_row(calc, header.column, header.row + 1)
     except ConfigError:
         total = calc.max_row + 1
-    buses = []
+    order, rows = [], {}
     for row in range(header.row + 1, total):
         value = _text(calc.cell(row, header.column).value)
         if not value or value == "合计":
             continue
         bu = _declaration_bu(value)
-        if bu and bu not in buses:
-            buses.append(bu)
-    if not buses:
+        if not bu:
+            continue
+        if bu not in rows:
+            order.append(bu)
+            rows[bu] = []
+        rows[bu].append(row)
+    if not order:
         raise ConfigError("计算底稿没有可申报的 BU 数据")
-    return buses
+    return order, rows
+
+
+def _income_formula(sheet_title, rows):
+    """申报租金收入链接计算底稿 C 列；2504 只取第一行，其余 BU 全部相加。"""
+    return "=" + "+".join(f"'{sheet_title}'!C{row}" for row in rows)
 
 
 def _existing_rows(sheet, start, total):
@@ -124,7 +134,7 @@ def update_declaration(book, period):
     if CALC_SHEET not in book.sheetnames:
         raise ConfigError(f"模板缺少工作表：{CALC_SHEET}")
 
-    buses = _calc_buses(book[CALC_SHEET])
+    buses, calc_rows = _calc_bus_rows(book[CALC_SHEET])
     sheet = book[DECLARATION_SHEET]
     header = _find_cell(sheet, "BU")
     if header is None:
@@ -162,6 +172,11 @@ def update_declaration(book, period):
             value = preserved.get(column)
             sheet[f"{column}{row}"].value = value
             writes.append((f"{column}{row}", value))
+        # 申报租金收入链接计算底稿；2504 只取第一行，其余 BU 全部相加。
+        rows = calc_rows[bu][:1] if bu == "2504" else calc_rows[bu]
+        income = _income_formula(CALC_SHEET, rows)
+        sheet.cell(row, 10).value = income
+        writes.append((f"J{row}", income))
         for column, value in ((4, TAX_OFFICE), (5, date(year, 1, 1)),
                               (6, date(year, 12, 31)),
                               (11, f"=$K${total}"), (12, f"=$L${total}")):
@@ -171,12 +186,14 @@ def update_declaration(book, period):
             sheet.cell(row, column).number_format = "yyyy/m/d"
 
     sheet.cell(total, 1).value = "合计"
+    sheet.cell(total, 10).value = f"=SUM(J{start}:J{total - 1})"
     sheet.cell(total, 11).value = quarter_start
     sheet.cell(total, 12).value = quarter_end
     for column in (11, 12):
         sheet.cell(total, column).number_format = "yyyy/m/d"
     writes.extend([
         (f"A{total}", "合计"),
+        (f"J{total}", f"=SUM(J{start}:J{total - 1})"),
         (f"K{total}", quarter_start),
         (f"L{total}", quarter_end),
     ])

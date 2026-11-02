@@ -670,7 +670,7 @@ class PropertyTaxFlow:
             sheet_name = self.get("计算底稿工作表", "房产税（从租）计算底稿")
             if sheet_name not in book.sheetnames:
                 raise ConfigError(f"更新表缺少工作表：{sheet_name}")
-            set_accounting_period(book[sheet_name], date.today())
+            set_accounting_period(book[sheet_name], self.accounting_period())
             report_path = self.context.get("jde_r55gl1005_path") or self.get("R55GL1005文件")
             if not report_path:
                 raise PendingModule("R55GL1005 导出待录制；请配置 房产税配置.R55GL1005文件，避免使用模板历史报表")
