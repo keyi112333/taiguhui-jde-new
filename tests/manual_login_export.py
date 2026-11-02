@@ -205,7 +205,7 @@ def main():
             f"大小={Path(template_path).stat().st_size if Path(template_path).is_file() else 0} 字节"
         )
 
-        # 重算走 compare_values 新口径：内部完成重算，通过返回 True，不通过抛 ConfigError。
+        # 重算走 compare_values 新口径：内部完成重算，通过返回 True，不通过返回 False 并记录原因。
         if flow.compare_values(template_path) is not True:
             raise SystemExit("模板金额比对未返回通过")
 

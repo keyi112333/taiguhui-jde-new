@@ -127,8 +127,9 @@ class TemplateCheckTests(unittest.TestCase):
             self.assertIsNone(context.get("journal_required"))
             sheet["H8"] = 23
             book.save(path)
-            with self.assertRaisesRegex(ConfigError, "核对失败"):
-                flow.compare_values(path)
+            # 核对不通过：返回 False 并记录失败原因，不再抛 ConfigError。
+            self.assertFalse(flow.compare_values(path))
             self.assertEqual(context.get("property_tax_check_status"), "failed")
+            self.assertIn("表格核对失败", context.get("property_tax_pending_reason"))
             self.assertFalse(Path(path).with_suffix(".核对结果.json").exists())
             self.assertEqual(recalc.call_count, 2)

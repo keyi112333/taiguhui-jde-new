@@ -730,7 +730,10 @@ class PropertyTaxFlow:
                 )
             if not passed:
                 failed = "、".join(item["核对项"] for item in results if not item["通过"])
-                raise ConfigError(f"模板核对失败：{failed}")
+                message = f"表格核对失败：{failed}"
+                logger.error(message)
+                self.context.set("property_tax_pending_reason", message)
+                return False
         except Exception:
             self.context.set("property_tax_check_status", "failed")
             raise
@@ -832,8 +835,11 @@ class PropertyTaxFlow:
             if type(decision) is not bool:
                 raise ConfigError("模块五必须明确返回是否需要分录")
             self.context.set("journal_required", decision)
-            if decision:
-                self.write_journal(path)
+            if not decision:
+                # 核对不通过：仅记录并提示，不抛异常、不进入分录。
+                self.context.set("property_tax_status", "failed")
+                return
+            self.write_journal(path)
             self.context.set("property_tax_status", "completed")
         except PendingModule as exc:
             self.context.set("property_tax_status", "pending")
