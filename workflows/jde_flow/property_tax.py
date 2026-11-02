@@ -19,6 +19,7 @@ from web.JDE.jde_function import (
     download_gl_movement,
     download_r55gl1005,
 )
+from workflows.jde_flow.declaration_update import DECLARATION_SHEET, update_declaration
 from workflows.jde_flow.template_update import (
     external_link_parts,
     restore_external_links,
@@ -306,11 +307,13 @@ def label_row(sheet, label, column=2):
 
 
 def apply_with_excel(path, changes, engine="Excel.Application",
-                     report=None, defined_name=None, format_jobs=None):
+                     report=None, defined_name=None, format_jobs=None,
+                     declaration=None):
     """由 Excel 写入变更单元格并保存，模板属性（页眉页脚、样式表、定义名、图片）保持原样。
 
     report=(文件, 工作表) 时，用该报表整块覆盖工作簿内的 R55GL1005 页；
-    format_jobs=[(工作表, 源行, [目标行...])] 用于沿用模板行的格式。
+    format_jobs=[(工作表, 源行, [目标行...])] 用于沿用模板行的格式；
+    declaration 为申报底稿结构变更（插入/删除明细行、写入单元格与日期格式）。
     """
     try:
         import pythoncom
@@ -350,6 +353,29 @@ def apply_with_excel(path, changes, engine="Excel.Application",
         book = open_book(path, False)
         if book.ReadOnly:
             raise ConfigError("生成文件被占用，无法保存更新结果")
+
+        if declaration:
+            sheet = book.Worksheets(declaration["sheet"])
+            # 金额等单元格先按原结构插入/删除，再统一写入，避免行号错位。
+            if declaration.get("insert_at"):
+                at = declaration["insert_at"]
+                count = declaration["insert_count"]
+                sheet.Rows(f"{at}:{at + count - 1}").Insert()
+                source_row = declaration["style_row"]
+                sheet.Rows(source_row).Copy()
+                sheet.Rows(f"{at}:{at + count - 1}").PasteSpecial(Paste=XL_PASTE_FORMATS)
+                app.CutCopyMode = False
+                sheet.Rows(f"{at}:{at + count - 1}").RowHeight = sheet.Rows(source_row).RowHeight
+            if declaration.get("delete_at"):
+                at = declaration["delete_at"]
+                count = declaration["delete_count"]
+                sheet.Rows(f"{at}:{at + count - 1}").Delete()
+            for cell_range in declaration.get("format_ranges", []):
+                sheet.Range(cell_range).NumberFormat = "yyyy/m/d"
+            changes = list(changes) + [
+                (declaration["sheet"], coordinate, value)
+                for coordinate, value in declaration["writes"]
+            ]
 
         if report:
             report_path, report_sheet = report
@@ -676,6 +702,7 @@ class PropertyTaxFlow:
             finally:
                 report.close()
             records = update_workbook(book, include_children=mode == "包含子科目")
+            declaration = update_declaration(book, self.accounting_period())
             book.calculation = CalcProperties(fullCalcOnLoad=True, forceFullCalc=True)
             blue = book.defined_names["蓝色"].attr_text if "蓝色" in book.defined_names else None
             engine = str(self.get("重算引擎", "Excel.Application")).strip()
@@ -691,13 +718,15 @@ class PropertyTaxFlow:
                 if new_total:
                     format_jobs.append((sheet_name, 9, list(range(9, new_total))))
                 try:
+                    skip = REWRITTEN_SHEETS + ((DECLARATION_SHEET,) if declaration else ())
                     apply_with_excel(
                         path,
-                        collect_changes(reference, book),
+                        collect_changes(reference, book, skip=skip),
                         engine=engine,
                         report=(report_path, source_name),
                         defined_name=("蓝色", blue) if blue else None,
                         format_jobs=format_jobs,
+                        declaration=declaration,
                     )
                 except ExcelUnavailable as exc:
                     logger.warning(f"Excel 不可用，改用 openpyxl 直接保存：{exc}")
