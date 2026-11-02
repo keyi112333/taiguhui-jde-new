@@ -12,6 +12,8 @@ from utils.helpers import ensure_dir,get_timestamp
 MENU_IFRAME = 'iframe[name="e1menuAppIframe"]'
 # 日记帐分录录入前需要选中的分录方案（JDE #gtab0_1 下拉值）。
 JOURNAL_SCHEME_OPTION = "8d5afde055f149ea973fb07587dafa28"
+# 粘贴前必须存在的列及顺序（TSV 按该顺序整块粘贴）。
+JOURNAL_COLUMNS = ("帐号", "借项金额", "贷项金额", "备注")
 
 OUTPUT_LINK_NAME = "可单击图标 查看输出"
 JOB_FILTER_NAME = "作业"
@@ -241,14 +243,189 @@ def _focus_journal_grid(frame, in_page, timeout):
     raise RuntimeError("未能把焦点移到分录网格，已跳过粘贴，避免写入日期栏")
 
 
+def _normalize_label(text):
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _role_header_labels(frame):
+    """读取网格 role=columnheader 的表头文字。"""
+    labels = []
+    try:
+        headers = frame.get_by_role("columnheader")
+        for index in range(headers.count()):
+            item = headers.nth(index)
+            try:
+                if not item.is_visible():
+                    continue
+                label = _normalize_label(item.inner_text())
+            except Exception:
+                continue
+            if label:
+                labels.append(label)
+    except Exception:
+        return []
+    return labels
+
+
+def _th_header_labels(frame):
+    """标准 table 表头兜底。"""
+    labels = []
+    try:
+        headers = frame.locator("th")
+        for index in range(headers.count()):
+            item = headers.nth(index)
+            try:
+                if not item.is_visible():
+                    continue
+                label = _normalize_label(item.inner_text())
+            except Exception:
+                continue
+            if label:
+                labels.append(label)
+    except Exception:
+        return []
+    return labels
+
+
+def _position_header_labels(frame):
+    """按表头文字与网格首行的相对位置读取列顺序。"""
+    inputs = frame.locator("#G0_1 input.JSTextfield")
+    if inputs.count() == 0:
+        inputs = frame.locator("tr[id^='G0_'] input.JSTextfield")
+    if inputs.count() == 0:
+        return []
+    try:
+        anchor = inputs.first.bounding_box()
+    except Exception:
+        return []
+    if not anchor:
+        return []
+    boxes = []
+    for name in JOURNAL_COLUMNS:
+        locator = frame.get_by_text(name)
+        found = []
+        for index in range(min(locator.count(), 20)):
+            item = locator.nth(index)
+            try:
+                if not item.is_visible():
+                    continue
+                box = item.bounding_box()
+            except Exception:
+                continue
+            if not box or box["width"] <= 0 or box["height"] <= 0:
+                continue
+            if box["y"] + box["height"] <= anchor["y"] + 2:
+                found.append(box)
+        if not found:
+            return []
+        found.sort(key=lambda box: box["y"] + box["height"])
+        boxes.append(found[-1])
+    tops = [box["y"] for box in boxes]
+    if max(tops) - min(tops) > 40:
+        return []
+    return [
+        name for name, _ in sorted(zip(JOURNAL_COLUMNS, boxes), key=lambda pair: pair[1]["x"])
+    ]
+
+
+def _journal_header_labels(frame):
+    """返回能找到全部目标列的表头顺序；找不到返回空列表。"""
+    for labels in (_role_header_labels(frame), _th_header_labels(frame),
+                   _position_header_labels(frame)):
+        if labels and all(name in labels for name in JOURNAL_COLUMNS):
+            return labels
+    return []
+
+
+def _verify_journal_columns(frame, timeout):
+    """粘贴前校验网格列顺序，不通过则中止，避免数据写入错误列。"""
+    wait_timeout = min(timeout, 5000)
+    try:
+        frame.locator("#G0_1 input.JSTextfield").first.wait_for(
+            state="visible", timeout=wait_timeout
+        )
+    except Exception:
+        try:
+            frame.locator("tr[id^='G0_'] input.JSTextfield").first.wait_for(
+                state="visible", timeout=wait_timeout
+            )
+        except Exception:
+            pass
+    labels = _journal_header_labels(frame)
+    if not labels:
+        raise RuntimeError("无法读取日记帐分录网格表头，未执行粘贴")
+    positions = {}
+    for index, label in enumerate(labels):
+        positions.setdefault(label, index)
+    missing = [name for name in JOURNAL_COLUMNS if name not in positions]
+    if missing:
+        raise RuntimeError(
+            f"分录网格缺少列：{'、'.join(missing)}；当前表头：{' / '.join(labels)}"
+        )
+    order = [name for name in sorted(positions, key=positions.get)]
+    if tuple(order) != JOURNAL_COLUMNS:
+        raise RuntimeError(
+            f"分录网格列顺序不符：期望 {'、'.join(JOURNAL_COLUMNS)}，"
+            f"实际 {'、'.join(order)}；当前表头：{' / '.join(labels)}"
+        )
+    logger.info(f"分录网格列顺序校验通过：{' / '.join(labels)}")
+
+
+def _click_cancel(frame, timeout):
+    """在当前 frame 点击一次取消，失败返回 False。"""
+    try:
+        button = frame.get_by_role("button", name="取消 (Ctrl+Alt+L)").first
+        if button.count() == 0 or not button.is_visible():
+            return False
+        button.click(timeout=timeout)
+        return True
+    except Exception as exc:
+        logger.warning(f"点击取消失败：{exc}")
+        return False
+
+
+def _click_cancel_anywhere(in_page, timeout, prefer_new=False):
+    """跨页面/frame 查找并点击取消；找不到返回 False。"""
+    pages = list(in_page.context.pages)
+    if prefer_new:
+        pages = [page for page in pages if page != in_page] + [in_page]
+    for page in pages:
+        try:
+            frames = page.frames
+        except Exception:
+            continue
+        for frame in frames:
+            try:
+                buttons = frame.get_by_role("button", name="取消 (Ctrl+Alt+L)")
+                for index in range(min(buttons.count(), 5)):
+                    button = buttons.nth(index)
+                    if button.is_visible():
+                        button.click(timeout=timeout)
+                        return True
+            except Exception:
+                continue
+    return False
+
+
+def _discard_entry(frame, in_page, timeout):
+    """取消分录录入：第二次取消可能不存在或出现在新页面，按尽力而为处理。"""
+    if not _click_cancel(frame, timeout):
+        _click_cancel_anywhere(in_page, timeout)
+    in_page.wait_for_timeout(800)
+    if _click_cancel_anywhere(in_page, min(timeout, 5000), prefer_new=True):
+        logger.info("已点击第二次取消")
+    else:
+        logger.info("未发现第二次取消按钮，跳过")
+
+
 def create_journal_entry(in_page, company, description, gl_date, rows,
                          scheme_option=JOURNAL_SCHEME_OPTION,
                          timeout=60000, discard=True):
     """录入日记帐分录并返回 JDE 生成的批号。
 
     rows 为 (帐号, 借项金额, 贷项金额, 备注) 序列，按 TSV 整块粘贴到第一个单元格，
-    行数随数据动态变化；粘贴前先在下拉框选中分录方案。
-    discard=True 时按录制脚本两次取消（开发环境不允许保存）。
+    行数随数据动态变化；粘贴前先选分录方案并校验网格列顺序。
+    discard=True 时按录制脚本取消退出（第二次取消可能不存在或位于新页面）。
     """
     if not rows:
         raise ValueError("分录没有可录入的数据行")
@@ -293,15 +470,19 @@ def create_journal_entry(in_page, company, description, gl_date, rows,
     scheme.select_option(scheme_option, timeout=timeout)
     logger.info(f"已选择分录方案：{scheme_option}")
     in_page.wait_for_timeout(1000)
+    # 列顺序不符时不粘贴，先取消录入再报错，避免数据写入错误列。
+    try:
+        _verify_journal_columns(frame, timeout)
+    except Exception:
+        _discard_entry(frame, in_page, timeout)
+        raise
     _focus_journal_grid(frame, in_page, timeout)
     in_page.keyboard.press("Control+V")
     in_page.wait_for_timeout(1000)
 
     if discard:
-        # 正式环境开发不允许保存，按录制脚本取消两次退出。
-        for _ in range(2):
-            frame.get_by_role("button", name="取消 (Ctrl+Alt+L)").click(timeout=timeout)
-            in_page.wait_for_timeout(500)
+        # 正式环境开发不允许保存；第二次取消可能不存在或在其他页面。
+        _discard_entry(frame, in_page, timeout)
         logger.info("已取消分录录入（未保存）")
     return batch
 
