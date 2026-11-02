@@ -9,7 +9,8 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from log.loggingConfig import logger
 from utils.helpers import ensure_dir,get_timestamp
 
-MENU_IFRAME = 'iframe[name="e1menuAppIframe"]'
+MENU_IFRAME_NAME = "e1menuAppIframe"
+MENU_IFRAME = f'iframe[name="{MENU_IFRAME_NAME}"]'
 # 日记帐分录录入前需要选中的分录方案（JDE #gtab0_1 下拉值）。
 JOURNAL_SCHEME_OPTION = "8d5afde055f149ea973fb07587dafa28"
 # 粘贴前必须存在的列及顺序（TSV 按该顺序整块粘贴）。
@@ -287,8 +288,19 @@ def _th_header_labels(frame):
     return labels
 
 
-def _position_header_labels(frame):
-    """按表头文字与网格首行的相对位置读取列顺序。"""
+def _app_frame(in_page):
+    """返回 JDE 菜单 iframe 的真实 Frame，用于按坐标读取整行表头。"""
+    for candidate in in_page.frames:
+        try:
+            if candidate.name == MENU_IFRAME_NAME:
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _position_header_labels(frame, in_page):
+    """按表头文字定位整行，返回该行从左到右的完整列名（用于连续校验）。"""
     inputs = frame.locator("#G0_1 input.JSTextfield")
     if inputs.count() == 0:
         inputs = frame.locator("tr[id^='G0_'] input.JSTextfield")
@@ -323,21 +335,61 @@ def _position_header_labels(frame):
     tops = [box["y"] for box in boxes]
     if max(tops) - min(tops) > 40:
         return []
-    return [
-        name for name, _ in sorted(zip(JOURNAL_COLUMNS, boxes), key=lambda pair: pair[1]["x"])
-    ]
+    real_frame = _app_frame(in_page)
+    if real_frame is None:
+        return []
+    top = min(box["y"] for box in boxes)
+    bottom = max(box["y"] + box["height"] for box in boxes)
+    left = min(box["x"] for box in boxes)
+    right = max(box["x"] + box["width"] for box in boxes)
+    try:
+        items = real_frame.evaluate(
+            """
+            ({top, bottom, left, right}) => {
+                const result = [];
+                for (const node of document.querySelectorAll('td, th, div, span, a, label')) {
+                    const rect = node.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) continue;
+                    const centerY = rect.top + rect.height / 2;
+                    if (centerY < top || centerY > bottom) continue;
+                    if (rect.right <= left || rect.left >= right) continue;
+                    let hasChildText = false;
+                    for (const child of node.children) {
+                        if ((child.innerText || '').trim()) { hasChildText = true; break; }
+                    }
+                    if (hasChildText) continue;
+                    const text = (node.innerText || '').replace(/\\s+/g, '');
+                    if (!text || text.length > 30) continue;
+                    result.push({text: text, x: rect.left, w: rect.width});
+                }
+                return result;
+            }
+            """,
+            {"top": top, "bottom": bottom, "left": left + 1, "right": right - 1},
+        )
+    except Exception:
+        return []
+    items.sort(key=lambda item: (item["x"], item["w"]))
+    labels, seen = [], set()
+    for item in items:
+        key = (item["text"], round(item["x"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(item["text"])
+    return labels
 
 
-def _journal_header_labels(frame):
+def _journal_header_labels(frame, in_page):
     """返回能找到全部目标列的表头顺序；找不到返回空列表。"""
     for labels in (_role_header_labels(frame), _th_header_labels(frame),
-                   _position_header_labels(frame)):
+                   _position_header_labels(frame, in_page)):
         if labels and all(name in labels for name in JOURNAL_COLUMNS):
             return labels
     return []
 
 
-def _verify_journal_columns(frame, timeout):
+def _verify_journal_columns(frame, in_page, timeout):
     """粘贴前校验网格列顺序，不通过则中止，避免数据写入错误列。"""
     wait_timeout = min(timeout, 5000)
     try:
@@ -351,22 +403,23 @@ def _verify_journal_columns(frame, timeout):
             )
         except Exception:
             pass
-    labels = _journal_header_labels(frame)
+    labels = _journal_header_labels(frame, in_page)
     if not labels:
         raise RuntimeError("无法读取日记帐分录网格表头，未执行粘贴")
-    positions = {}
-    for index, label in enumerate(labels):
-        positions.setdefault(label, index)
-    missing = [name for name in JOURNAL_COLUMNS if name not in positions]
-    if missing:
+    width = len(JOURNAL_COLUMNS)
+    matched = any(
+        tuple(labels[start:start + width]) == JOURNAL_COLUMNS
+        for start in range(len(labels) - width + 1)
+    )
+    if not matched:
+        missing = [name for name in JOURNAL_COLUMNS if name not in labels]
+        if missing:
+            raise RuntimeError(
+                f"分录网格缺少列：{'、'.join(missing)}；当前表头：{' / '.join(labels)}"
+            )
         raise RuntimeError(
-            f"分录网格缺少列：{'、'.join(missing)}；当前表头：{' / '.join(labels)}"
-        )
-    order = [name for name in sorted(positions, key=positions.get)]
-    if tuple(order) != JOURNAL_COLUMNS:
-        raise RuntimeError(
-            f"分录网格列顺序不符：期望 {'、'.join(JOURNAL_COLUMNS)}，"
-            f"实际 {'、'.join(order)}；当前表头：{' / '.join(labels)}"
+            f"分录网格列顺序不符（四列必须连续）：期望 {'、'.join(JOURNAL_COLUMNS)}，"
+            f"当前表头：{' / '.join(labels)}"
         )
     logger.info(f"分录网格列顺序校验通过：{' / '.join(labels)}")
 
@@ -472,7 +525,7 @@ def create_journal_entry(in_page, company, description, gl_date, rows,
     in_page.wait_for_timeout(1000)
     # 列顺序不符时不粘贴，先取消录入再报错，避免数据写入错误列。
     try:
-        _verify_journal_columns(frame, timeout)
+        _verify_journal_columns(frame, in_page, timeout)
     except Exception:
         _discard_entry(frame, in_page, timeout)
         raise
