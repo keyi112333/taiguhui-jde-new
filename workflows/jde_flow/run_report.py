@@ -16,8 +16,10 @@ RESULT_HEADERS = (
     "运行结果", "异常情况", "运行开始时间", "运行结束时间",
 )
 RESULT_WIDTHS = (12, 16, 12, 20, 14, 40, 20, 20)
-ROBOT_SHEET_PATTERN = re.compile(r"^WechatRobot(\d+)$", re.IGNORECASE)
-WEBHOOK_KEYS = ("webhook", "webhook_url", "url", "地址", "机器人地址")
+NOTIFY_SHEET = "通知配置"
+ITEM_KEY = "配置项"
+VALUE_KEY = "值"
+ROBOT_ITEM_PATTERN = re.compile(r"^WechatRobot(\d+)$", re.IGNORECASE)
 
 
 def result_file_path(config, year=None):
@@ -76,37 +78,22 @@ def build_notification_message(company, period, total, success, failed, filename
     )
 
 
-def _robot_sheets(config):
+def _robot_items(config):
+    """读取「通知配置」页中的 WechatRobotN 项及其 Webhook 地址，按序号排序。"""
     try:
-        names = list(config.sheet_names())
+        rows = config.get_rows(NOTIFY_SHEET)
     except (AttributeError, TypeError):
         return []
-    sheets = []
-    for name in names:
-        match = ROBOT_SHEET_PATTERN.fullmatch(str(name).strip())
-        if match:
-            sheets.append((int(match.group(1)), name))
-    return [name for _, name in sorted(sheets)]
-
-
-def _read_webhook(config, sheet):
-    try:
-        rows = config.get_rows(sheet)
-    except (AttributeError, TypeError):
-        rows = []
+    items = []
     for row in rows:
-        values = [row.get(key) for key in WEBHOOK_KEYS] + list(row.values())
-        for value in values:
-            if isinstance(value, str) and value.strip().lower().startswith("http"):
-                return value.strip()
-    for key in WEBHOOK_KEYS:
-        try:
-            value = config.get(f"{sheet}.{key}", "")
-        except (AttributeError, TypeError):
-            value = ""
-        if isinstance(value, str) and value.strip().lower().startswith("http"):
-            return value.strip()
-    return ""
+        name = str(row.get(ITEM_KEY) or "").strip()
+        match = ROBOT_ITEM_PATTERN.fullmatch(name)
+        if match is None:
+            continue
+        value = row.get(VALUE_KEY)
+        webhook = value.strip() if isinstance(value, str) else ""
+        items.append((int(match.group(1)), name, webhook))
+    return [(name, webhook) for _, name, webhook in sorted(items)]
 
 
 def _check_response(response):
@@ -143,10 +130,9 @@ def _upload_file(webhook, path, timeout=60):
 def notify_wechat_robots(config, message, file_path=None, timeout=15):
     """逐个机器人发送通知；未配置 Webhook 的机器人跳过，单个失败不影响其他机器人。"""
     sent = 0
-    for sheet in _robot_sheets(config):
-        webhook = _read_webhook(config, sheet)
+    for name, webhook in _robot_items(config):
         if not webhook:
-            logger.info(f"{sheet} 未配置 Webhook，跳过通知")
+            logger.info(f"{NOTIFY_SHEET} 中 {name} 未配置 Webhook，跳过通知")
             continue
         try:
             _send_webhook(
@@ -158,9 +144,9 @@ def notify_wechat_robots(config, message, file_path=None, timeout=15):
                     webhook, {"msgtype": "file", "file": {"media_id": media_id}}, timeout
                 )
             sent += 1
-            logger.info(f"{sheet} 通知已发送")
+            logger.info(f"{name} 通知已发送")
         except Exception as exc:
-            logger.warning(f"{sheet} 通知发送失败：{exc}")
+            logger.warning(f"{name} 通知发送失败：{exc}")
     if sent == 0:
         logger.info("没有可用的企业微信机器人，未发送通知")
     return sent

@@ -95,5 +95,5 @@ class ConfigLoader:
 
     @property
     def sheet_names(self) -> list:
-        """已加载的工作表名称，用于遍历 WechatRobot1、WechatRobot2 等通知配置页。"""
+        """已加载的工作表名称。"""
         return list(self._config)

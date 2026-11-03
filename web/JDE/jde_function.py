@@ -2,7 +2,6 @@
 import functools
 import re
 import time
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -10,8 +9,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from log.loggingConfig import logger
 from utils.helpers import ensure_dir,get_timestamp
 
-MENU_IFRAME_NAME = "e1menuAppIframe"
-MENU_IFRAME = f'iframe[name="{MENU_IFRAME_NAME}"]'
+MENU_IFRAME = 'iframe[name="e1menuAppIframe"]'
 # 日记帐分录录入前需要选中的分录方案（JDE #gtab0_1 下拉值）。
 JOURNAL_SCHEME_OPTION = "8d5afde055f149ea973fb07587dafa28"
 # 粘贴前必须存在的列及顺序（TSV 按该顺序整块粘贴）。
@@ -289,19 +287,8 @@ def _th_header_labels(frame):
     return labels
 
 
-def _app_frame(in_page):
-    """返回 JDE 菜单 iframe 的真实 Frame，用于按坐标读取整行表头。"""
-    for candidate in in_page.frames:
-        try:
-            if candidate.name == MENU_IFRAME_NAME:
-                return candidate
-        except Exception:
-            continue
-    return None
-
-
-def _position_header_labels(frame, in_page):
-    """按表头文字定位整行，返回该行从左到右的完整列名（用于连续校验）。"""
+def _position_header_labels(frame):
+    """按表头文字与网格首行的相对位置读取列顺序。"""
     inputs = frame.locator("#G0_1 input.JSTextfield")
     if inputs.count() == 0:
         inputs = frame.locator("tr[id^='G0_'] input.JSTextfield")
@@ -315,29 +302,20 @@ def _position_header_labels(frame, in_page):
         return []
     boxes = []
     for name in JOURNAL_COLUMNS:
-        # 允许表头文字中间夹空格或换行（如“借 项 金 额”）。
-        pattern = re.compile(r"\s*".join(re.escape(part) for part in name))
-        locator = frame.get_by_text(pattern)
-        exact, loose = [], []
-        for index in range(min(locator.count(), 50)):
+        locator = frame.get_by_text(name)
+        found = []
+        for index in range(min(locator.count(), 20)):
             item = locator.nth(index)
             try:
                 if not item.is_visible():
                     continue
-                text = _normalize_label(item.inner_text())
                 box = item.bounding_box()
             except Exception:
                 continue
             if not box or box["width"] <= 0 or box["height"] <= 0:
                 continue
-            if box["y"] + box["height"] > anchor["y"] + 2:
-                continue
-            entry = (box, box["width"] * box["height"])
-            if text == name:
-                exact.append(entry)
-            elif name in text:
-                loose.append(entry)
-        found = [box for box, _ in (exact or loose)]
+            if box["y"] + box["height"] <= anchor["y"] + 2:
+                found.append(box)
         if not found:
             return []
         found.sort(key=lambda box: box["y"] + box["height"])
@@ -345,70 +323,21 @@ def _position_header_labels(frame, in_page):
     tops = [box["y"] for box in boxes]
     if max(tops) - min(tops) > 40:
         return []
-    real_frame = _app_frame(in_page)
-    if real_frame is None:
-        return []
-    top = min(box["y"] for box in boxes)
-    bottom = max(box["y"] + box["height"] for box in boxes)
-    left = min(box["x"] for box in boxes)
-    right = max(box["x"] + box["width"] for box in boxes)
-    try:
-        items = real_frame.evaluate(
-            """
-            ({top, bottom, left, right}) => {
-                const result = [];
-                for (const node of document.querySelectorAll('td, th, div, span, a, label')) {
-                    const rect = node.getBoundingClientRect();
-                    if (rect.width <= 0 || rect.height <= 0) continue;
-                    const centerY = rect.top + rect.height / 2;
-                    if (centerY < top || centerY > bottom) continue;
-                    if (rect.right <= left || rect.left >= right) continue;
-                    let hasChildText = false;
-                    for (const child of node.children) {
-                        if ((child.innerText || '').trim()) { hasChildText = true; break; }
-                    }
-                    if (hasChildText) continue;
-                    const text = (node.innerText || '').replace(/\\s+/g, '');
-                    if (!text || text.length > 30) continue;
-                    result.push({text: text, x: rect.left, w: rect.width});
-                }
-                return result;
-            }
-            """,
-            {"top": top, "bottom": bottom, "left": left + 1, "right": right - 1},
-        )
-    except Exception:
-        return []
-    items.sort(key=lambda item: (item["x"], item["w"]))
-    labels, seen = [], set()
-    for item in items:
-        key = (item["text"], round(item["x"]))
-        if key in seen:
-            continue
-        seen.add(key)
-        labels.append(item["text"])
-    return labels
+    return [
+        name for name, _ in sorted(zip(JOURNAL_COLUMNS, boxes), key=lambda pair: pair[1]["x"])
+    ]
 
 
-def _journal_header_labels(frame, in_page):
+def _journal_header_labels(frame):
     """返回能找到全部目标列的表头顺序；找不到返回空列表。"""
-    candidates = (
-        ("role=columnheader", _role_header_labels(frame)),
-        ("th", _th_header_labels(frame)),
-        ("输入框属性", _input_attribute_labels(frame)),
-        ("坐标整行", _position_header_labels(frame, in_page)),
-    )
-    for source, labels in candidates:
+    for labels in (_role_header_labels(frame), _th_header_labels(frame),
+                   _position_header_labels(frame)):
         if labels and all(name in labels for name in JOURNAL_COLUMNS):
-            logger.info(f"分录网格表头来源：{source}")
             return labels
-    for source, labels in candidates:
-        if labels:
-            logger.info(f"分录网格表头（{source}）未包含全部目标列：{' / '.join(labels[:20])}")
     return []
 
 
-def _verify_journal_columns(frame, in_page, timeout):
+def _verify_journal_columns(frame, timeout):
     """粘贴前校验网格列顺序，不通过则中止，避免数据写入错误列。"""
     wait_timeout = min(timeout, 5000)
     try:
@@ -422,161 +351,24 @@ def _verify_journal_columns(frame, in_page, timeout):
             )
         except Exception:
             pass
-    labels = _journal_header_labels(frame, in_page)
+    labels = _journal_header_labels(frame)
     if not labels:
-        logger.warning(
-            "无法读取日记帐分录网格表头，改为粘贴后校验首行数据；"
-            f"首输入框属性={_grid_input_probe(frame)}"
-        )
-        return False
-    width = len(JOURNAL_COLUMNS)
-    matched = any(
-        tuple(labels[start:start + width]) == JOURNAL_COLUMNS
-        for start in range(len(labels) - width + 1)
-    )
-    if not matched:
-        missing = [name for name in JOURNAL_COLUMNS if name not in labels]
-        if missing:
-            raise RuntimeError(
-                f"分录网格缺少列：{'、'.join(missing)}；当前表头：{' / '.join(labels)}"
-            )
+        raise RuntimeError("无法读取日记帐分录网格表头，未执行粘贴")
+    positions = {}
+    for index, label in enumerate(labels):
+        positions.setdefault(label, index)
+    missing = [name for name in JOURNAL_COLUMNS if name not in positions]
+    if missing:
         raise RuntimeError(
-            f"分录网格列顺序不符（四列必须连续）：期望 {'、'.join(JOURNAL_COLUMNS)}，"
-            f"当前表头：{' / '.join(labels)}"
+            f"分录网格缺少列：{'、'.join(missing)}；当前表头：{' / '.join(labels)}"
+        )
+    order = [name for name in sorted(positions, key=positions.get)]
+    if tuple(order) != JOURNAL_COLUMNS:
+        raise RuntimeError(
+            f"分录网格列顺序不符：期望 {'、'.join(JOURNAL_COLUMNS)}，"
+            f"实际 {'、'.join(order)}；当前表头：{' / '.join(labels)}"
         )
     logger.info(f"分录网格列顺序校验通过：{' / '.join(labels)}")
-    return True
-
-
-def _grid_inputs(frame):
-    inputs = frame.locator("#G0_1 input.JSTextfield")
-    if inputs.count() < 4:
-        inputs = frame.locator("tr[id^='G0_'] input.JSTextfield")
-    return inputs
-
-
-def _grid_input_probe(frame):
-    """记录首输入框属性，便于表头读取失败时排查 DOM。"""
-    inputs = _grid_inputs(frame)
-    if inputs.count() == 0:
-        return {}
-    try:
-        return inputs.first.evaluate(
-            "el => ({id: el.id, name: el.name, aria: el.getAttribute('aria-label'),"
-            " title: el.title, cls: el.className})"
-        )
-    except Exception:
-        return {}
-
-
-def _input_attribute_labels(frame):
-    """从网格输入框的 aria-label/title 读取列名（部分 JDE 皮肤会带）。"""
-    inputs = _grid_inputs(frame)
-    labels = []
-    for index in range(min(inputs.count(), 12)):
-        item = inputs.nth(index)
-        try:
-            raw = item.get_attribute("aria-label") or item.get_attribute("title") or ""
-        except Exception:
-            continue
-        label = _normalize_label(raw)
-        if label:
-            labels.append(label)
-    return labels
-
-
-def _amount_equal(left, right):
-    def parse(value):
-        text = str(value or "").replace(",", "").strip()
-        if not text:
-            return Decimal(0)
-        try:
-            return Decimal(text)
-        except InvalidOperation:
-            return None
-    left_value, right_value = parse(left), parse(right)
-    if left_value is None or right_value is None:
-        return str(left or "").strip() == str(right or "").strip()
-    return left_value == right_value
-
-
-def _first_grid_row_values(frame, in_page, account):
-    """按帐号值定位粘贴行，返回该行前 4 个网格输入框的值。"""
-    real_frame = _app_frame(in_page)
-    if real_frame is None:
-        return []
-    try:
-        return real_frame.evaluate(
-            """
-            (account) => {
-                const inputs = Array.from(document.querySelectorAll('input.JSTextfield'));
-                for (const input of inputs) {
-                    if ((input.value || '').trim() !== account) continue;
-                    let row = input.closest('tr');
-                    if (!row) {
-                        let node = input.parentElement;
-                        for (let depth = 0; depth < 5 && node; depth += 1, node = node.parentElement) {
-                            if (node.querySelectorAll('input.JSTextfield').length >= 4) {
-                                row = node;
-                                break;
-                            }
-                        }
-                    }
-                    if (!row) continue;
-                    const cells = Array.from(row.querySelectorAll('input.JSTextfield'));
-                    if (cells.length >= 4) {
-                        return cells.slice(0, 4).map(cell => cell.value || '');
-                    }
-                }
-                return [];
-            }
-            """,
-            account,
-        )
-    except Exception:
-        return []
-
-
-def _grid_row_values(frame, in_page, account, timeout):
-    values = _first_grid_row_values(frame, in_page, account)
-    if values:
-        return values
-    inputs = _grid_inputs(frame)
-    if inputs.count() < 4:
-        return []
-    try:
-        return [inputs.nth(index).input_value(timeout=timeout) for index in range(4)]
-    except Exception:
-        return []
-
-
-def _row_matches(actual, expected):
-    if len(actual) < 4:
-        return False
-    return (
-        actual[0].strip() == expected[0].strip()
-        and _amount_equal(actual[1], expected[1])
-        and _amount_equal(actual[2], expected[2])
-        and actual[3].strip() == expected[3].strip()
-    )
-
-
-def _verify_pasted_row(frame, in_page, row, timeout):
-    """表头读不到时，按粘贴后首行前 4 列的值确认列位置。"""
-    # 与粘贴 TSV 保持一致：空值写空字符串，而不是 "None"。
-    expected = ["" if value is None else _cell_text(value) for value in row]
-    account = expected[0].strip()
-    deadline = time.monotonic() + min(timeout / 1000, 10)
-    actual = []
-    while True:
-        actual = _grid_row_values(frame, in_page, account, timeout)
-        if _row_matches(actual, expected):
-            logger.info(f"粘贴后首行校验通过：{actual}")
-            return
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(0.5)
-    raise RuntimeError(f"粘贴后首行列位置不符：期望 {expected}，实际 {actual}")
 
 
 def _click_cancel(frame, timeout):
@@ -677,25 +469,18 @@ def create_journal_entry(in_page, company, description, gl_date, rows,
     scheme.wait_for(state="visible", timeout=timeout)
     # scheme.select_option(scheme_option, timeout=timeout)
     # logger.info(f"已选择分录方案：{scheme_option}")
-    scheme.select_option(label ="RPA", timeout=timeout)
+    scheme.select_option(label="RPA", timeout=timeout)
     logger.info(f"已选择分录方案：RPA")
     in_page.wait_for_timeout(1000)
     # 列顺序不符时不粘贴，先取消录入再报错，避免数据写入错误列。
     try:
-        header_checked = _verify_journal_columns(frame, in_page, timeout)
+        _verify_journal_columns(frame, timeout)
     except Exception:
         _discard_entry(frame, in_page, timeout)
         raise
     _focus_journal_grid(frame, in_page, timeout)
     in_page.keyboard.press("Control+V")
     in_page.wait_for_timeout(1000)
-    if not header_checked:
-        # 表头读不到时，用粘贴结果反查首行列位置。
-        try:
-            _verify_pasted_row(frame, in_page, rows[0], timeout)
-        except Exception:
-            _discard_entry(frame, in_page, timeout)
-            raise
 
     if discard:
         # 正式环境开发不允许保存；第二次取消可能不存在或在其他页面。

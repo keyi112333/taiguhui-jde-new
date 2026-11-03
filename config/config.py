@@ -98,7 +98,7 @@ class Config:
         return []
 
     def sheet_names(self) -> list:
-        """获取已加载的配置页名称，用于遍历 WechatRobot1、WechatRobot2 等通知配置。"""
+        """获取已加载的配置页名称。"""
         if self._loader:
             return self._loader.sheet_names
         return []
