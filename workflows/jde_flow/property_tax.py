@@ -28,6 +28,7 @@ from workflows.jde_flow.template_update import (
 from workflows.jde_flow.template_check import (
     check_sheet,
     convert_legacy_excel_to_xlsx,
+    journal_region,
     recalculate_file,
 )
 
@@ -775,30 +776,19 @@ class PropertyTaxFlow:
         return True
 
     def journal_rows(self, path):
-        """读取计算底稿 G-J（帐号/借项金额/贷项金额/备注），返回分录行与说明。"""
+        """按账号/借项金额/贷项金额/备注标题动态定位分录区并读取。"""
         book = openpyxl.load_workbook(path, data_only=True)
         try:
             name = self.get("分录工作表", "房产税（从租）计算底稿")
             if name not in book.sheetnames:
                 raise ConfigError(f"计算底稿缺少工作表：{name}")
             sheet = book[name]
-            header_row, columns = None, {}
-            for row in range(1, min(sheet.max_row, 30) + 1):
-                found = {}
-                for cell in sheet[row]:
-                    title = normalize_header_name(cell.value)
-                    if title in ("帐号", "借项金额", "贷项金额", "备注"):
-                        found[title] = cell.column
-                if len(found) == 4:
-                    header_row, columns = row, found
-                    break
-            if header_row is None:
-                raise ConfigError("未在计算底稿中找到 帐号/借项金额/贷项金额/备注 标题行")
+            _, columns, region = journal_region(sheet)
             rows = []
-            for row in range(header_row + 1, sheet.max_row + 1):
-                code = sheet.cell(row, columns["帐号"]).value
+            for row in region:
+                code = sheet.cell(row, columns["账号"]).value
                 if code is None or not str(code).strip():
-                    break
+                    continue
                 rows.append((
                     str(code).strip(),
                     sheet.cell(row, columns["借项金额"]).value,

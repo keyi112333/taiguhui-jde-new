@@ -71,6 +71,47 @@ def recalculate_file(path, engine="Excel.Application"):
 
 
 INVALID_SHEET_CHARS = re.compile(r"[\\/*?:\[\]]")
+JOURNAL_TITLES = ("账号", "借项金额", "贷项金额", "备注")
+
+
+def _journal_title(value):
+    """分录区标题规范化：忽略空白并统一“帐/账”，不依赖标题所在行。"""
+    if value is None:
+        return ""
+    return re.sub(r"\s+", "", str(value)).replace("帐", "账")
+
+
+def journal_region(sheet):
+    """按账号/借项金额/贷项金额/备注四个标题动态定位分录区。
+
+    标题行可以不在第一行，四列也可以不相邻；数据区从表头下一行开始，
+    到最后一个有账号的行结束（不按账号后缀筛选）。
+    返回 (表头行, {标题: 列号}, 数据行号列表)。
+    """
+    expected = {_journal_title(title) for title in JOURNAL_TITLES}
+    matches = []
+    for row in sheet.iter_rows():
+        found = {}
+        for cell in row:
+            title = _journal_title(cell.value)
+            if title in expected:
+                found[title] = cell.column
+        if len(found) == len(expected):
+            matches.append((row[0].row, found))
+    if not matches:
+        raise ConfigError("未找到 账号/借项金额/贷项金额/备注 标题行")
+    if len(matches) > 1:
+        raise ConfigError(f"无法唯一定位分录区表头：找到 {len(matches)} 处")
+    header_row, columns = matches[0]
+    account_column = columns["账号"]
+    last_row = None
+    for row in range(header_row + 1, sheet.max_row + 1):
+        value = sheet.cell(row, account_column).value
+        if value is not None and str(value).strip():
+            last_row = row
+    if last_row is None:
+        return header_row, columns, []
+    return header_row, columns, list(range(header_row + 1, last_row + 1))
 
 
 def _normalize_used_values(values, rows, cols):
@@ -336,12 +377,26 @@ def check_sheet(sheet, tolerance="0.00", audit=None):
     fixed = unique([sheet.cell(r, bu_col) for r in range(bu_header.row + 1, total.row)
                     if label(sheet.cell(r, bu_col).value) == "250108"], "固定 BU 250108 行")
     number(fixed.row, bu_col + 1)
-    debit_header = unique([c for row in sheet for c in row if label(c.value) == "借项金额"], "借项金额表头")
-    debit_rows = [r for r in range(debit_header.row + 1, sheet.max_row + 1)
-                  if label(sheet.cell(r, debit_header.column - 1).value).endswith(".917013")]
+    _, journal_columns, region_rows = journal_region(sheet)
+    debit_column = journal_columns["借项金额"]
+    debit_rows = []
+    debit = Decimal(0)
+    for r in region_rows:
+        account = sheet.cell(r, journal_columns["账号"]).value
+        if account is None or not str(account).strip():
+            continue
+        debit_value = sheet.cell(r, debit_column).value
+        credit_value = sheet.cell(r, journal_columns["贷项金额"]).value
+        if debit_value is not None and str(debit_value).strip():
+            debit += number(r, debit_column)
+            debit_rows.append(r)
+        elif credit_value is not None and str(credit_value).strip():
+            continue
+        else:
+            # 借贷两列都为空：通常是公式未重算，交给 number() 给出具体单元格。
+            number(r, debit_column)
     if not debit_rows:
         raise ConfigError("没有找到借项分录行")
-    debit = sum((number(r, debit_header.column) for r in debit_rows), Decimal(0))
     check_header = unique([c for row in sheet for c in row
                            if label(c.value) == "分类帐类型1金额"], "Check 金额表头")
     check_rows = [r for r in range(check_header.row + 1, sheet.max_row + 1)

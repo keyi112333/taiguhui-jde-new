@@ -13,6 +13,7 @@ from workflows.jde_flow.template_check import (
     _trim_empty_tail,
     _write_sheets_to_xlsx,
     check_sheet,
+    journal_region,
 )
 
 
@@ -23,7 +24,10 @@ class TemplateCheckTests(unittest.TestCase):
         sheet = book.active
         sheet.title = "房产税（从租）计算底稿"
         sheet["B7"] = "BU"
+        sheet["G7"] = "帐号"
         sheet["H7"] = "借项\n金额"
+        sheet["I7"] = "贷项金额"
+        sheet["J7"] = "备注"
         sheet["P4"] = "分类帐类型 1 金额"
         for i in range(count):
             sheet.cell(9+i, 2).value = 250104
@@ -65,6 +69,33 @@ class TemplateCheckTests(unittest.TestCase):
         sheet["H8"] = None
         with self.assertRaisesRegex(ConfigError, "无法取数"):
             check_sheet(sheet)
+
+    def test_journal_region_finds_headers_not_in_first_row(self):
+        book = openpyxl.Workbook()
+        self.addCleanup(book.close)
+        sheet = book.active
+        sheet["A4"] = "帐号"
+        sheet["B4"] = "借项\n金额"
+        sheet["E4"] = "贷项金额"
+        sheet["C4"] = "备注"
+        sheet["A5"] = "250104.917013"
+        sheet["B5"] = 12
+        sheet["E5"] = -12
+        sheet["C6"] = "只有备注"
+        sheet["A7"] = "250105.000000"
+        sheet["B7"] = 30
+        sheet["A8"] = "250106.000000"
+        sheet["B8"] = 40
+        header_row, columns, rows = journal_region(sheet)
+        self.assertEqual(header_row, 4)
+        self.assertEqual(columns["账号"], 1)
+        self.assertEqual(rows, [5, 6, 7, 8])
+
+    def test_debit_sum_does_not_filter_by_account_suffix(self):
+        _, sheet = self.sheet(2)
+        sheet["G8"] = "250104.123456"
+        results = check_sheet(sheet)
+        self.assertTrue(all(item["通过"] for item in results))
 
     def test_used_range_values_are_normalized(self):
         self.assertEqual(_normalize_used_values("x", 1, 1), (("x",),))
