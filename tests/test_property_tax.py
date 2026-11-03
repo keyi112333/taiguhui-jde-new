@@ -1,6 +1,7 @@
 """本地临时工作簿验证，不连接 JDE。"""
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from datetime import date
 import unittest
 import json
 from unittest.mock import MagicMock, patch
@@ -129,6 +130,7 @@ class PropertyTaxTests(unittest.TestCase):
             page,
             company="02501",
             destination=raw_path,
+            period=date(2026, 10, 1),
         )
         convert.assert_called_once_with(raw_path, expected_xlsx)
         self.assertEqual(result, expected_xlsx)

@@ -465,16 +465,20 @@ class PropertyTaxFlow:
         first, _ = month_bounds(configured_period(self.get("会计期间")))
         return first
 
+    def ledger_month(self):
+        """明细账与 R55GL1005 共用的会计期间：上下文优先，空白按自然月。"""
+        value = self.context.get("jde_ledger_period")
+        if not str(value or "").strip():
+            value = self.get("会计期间")
+        return month_bounds(configured_period(value))
+
     def ledger_dates(self):
         """返回明细账起始和结束日期，优先使用配置项；未配置时按会计期间自然月计算。"""
         start = self.context.get("jde_ledger_start")
         end = self.context.get("jde_ledger_end")
         if start and end:
             return(format_jde_date(start, "明细账起始日期"), format_jde_date(end, "明细账至日期"))
-        value = self.context.get("jde_ledger_period")
-        if not str(value or "").strip():
-            value = self.get("会计期间")
-        first, last = month_bounds(configured_period(value))
+        first, last = self.ledger_month()
         return (format_jde_date(first, "明细账起始日期") if start else format_jde_date(first, "会计期间起始日期"),
                 format_jde_date(last, "明细账至日期") if end else format_jde_date(last, "会计期间结束日期"))
 
@@ -537,10 +541,12 @@ class PropertyTaxFlow:
         destination = Path(destination)
         if destination.suffix.lower() != ".xlsx":
             destination = destination.with_suffix(".xlsx")
+        period, _ = self.ledger_month()
         raw_path = download_r55gl1005(
             page,
             company=company,
             destination=destination.with_suffix(".xls"),
+            period=period,
         )
         convert_legacy_excel_to_xlsx(raw_path, destination)
         logger.info(f"R55GL1005 已转换为工作簿格式：{destination}")

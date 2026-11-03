@@ -2,6 +2,7 @@
 import functools
 import re
 import time
+from datetime import date, datetime
 from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -620,7 +621,22 @@ def _wait_latest_job_completed(frame, timeout,
         time.sleep(min(JOB_STATUS_POLL_INTERVAL_SECONDS, max(0, remaining)))
 
 
-def download_r55gl1005(in_page, company, destination, timeout=60000):
+def _r55_period_parts(period):
+    """R55GL1005 数据选择的会计年度（两位）与期间编号；未传值按当前自然月。"""
+    if period is None or not str(period).strip():
+        period = date.today()
+    if not isinstance(period, (datetime, date)):
+        text = str(period).strip()
+        match = re.fullmatch(r"(\d{4})[-/年]?(\d{1,2})月?", text)
+        if not match:
+            raise ValueError(
+                f"会计期间格式不正确，应为 YYYY-MM 或 YYYY/MM 等可识别格式；当前值：{text}"
+            )
+        period = date(int(match.group(1)), int(match.group(2)), 1)
+    return period.strftime("%y"), str(period.month)
+
+
+def download_r55gl1005(in_page, company, destination, period=None, timeout=60000):
     """返回主页，提交 R55GL1005 报表并下载生成的 Excel 文件。"""
     home = in_page.get_by_title("主页")
     home.wait_for(state="visible", timeout=timeout)
@@ -651,6 +667,15 @@ def download_r55gl1005(in_page, company, destination, timeout=60000):
     company_value = str(company).strip().lstrip("0") or "0"
     selection.fill("", timeout=timeout)
     selection.fill(company_value, timeout=timeout)
+
+    fiscal_year, period_number = _r55_period_parts(period)
+    logger.info(f"填写会计年度 {fiscal_year}、期间编号 {period_number}")
+    for name, value in (("E2", fiscal_year), ("E3", period_number)):
+        field = frame.locator(f'input[name="{name}"]')
+        field.wait_for(state="visible", timeout=timeout)
+        field.click(timeout=timeout)
+        field.fill(value, timeout=timeout)
+
     frame.get_by_role("button", name="确定 (Ctrl+Alt+O)").click(timeout=timeout)
 
     frame.locator("a").filter(has_text="屏幕(F)").click(timeout=timeout)
