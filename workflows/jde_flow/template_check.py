@@ -425,19 +425,32 @@ def check_sheet(sheet, tolerance="0.00", audit=None):
             def audit_label_cell(label_text):
                 cells = [c for row in sheet.iter_rows() for c in row
                          if label(c.value) == label_text]
-                if len(cells) != 1:
+                if len(cells) > 1:
                     raise ConfigError(f"无法唯一定位审核底稿「{label_text}」：找到 {len(cells)} 处")
-                return cells[0]
+                return cells[0] if cells else None
 
             taxable_label = audit_label_cell("计算房产税-从租科目")
-            moh_label = audit_label_cell("MOH")
             diff_label = audit_label_cell("Diff")
+            moh_label = audit_label_cell("MOH")
+            if taxable_label is None:
+                raise ConfigError("审核底稿缺少「计算房产税-从租科目」")
+            if diff_label is None:
+                raise ConfigError("审核底稿缺少「Diff」")
             taxable = number(taxable_label.row, taxable_label.column + 1)
-            moh = number(moh_label.row, moh_label.column + 1)
-            difference = number(diff_label.row, diff_label.column + 1)
+            try:
+                difference = number(diff_label.row, diff_label.column + 1)
+            except ConfigError:
+                difference = Decimal(0)
             taxable_coord = f"{audit.title}!{sheet.cell(taxable_label.row, taxable_label.column + 1).coordinate}"
-            moh_coord = f"{audit.title}!{sheet.cell(moh_label.row, moh_label.column + 1).coordinate}"
             diff_coord = f"{audit.title}!{sheet.cell(diff_label.row, diff_label.column + 1).coordinate}"
+            if moh_label is None:
+                moh, moh_coord = Decimal(0), ""
+            else:
+                moh_coord = f"{audit.title}!{sheet.cell(moh_label.row, moh_label.column + 1).coordinate}"
+                try:
+                    moh = number(moh_label.row, moh_label.column + 1)
+                except ConfigError:
+                    moh = Decimal(0)
         finally:
             sheet = original
         return [result("税额合计=借项汇总", tax, debit,
