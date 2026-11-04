@@ -444,19 +444,21 @@ def check_sheet(sheet, tolerance="0.00", audit=None):
             taxable_coord = f"{audit.title}!{sheet.cell(taxable_label.row, taxable_label.column + 1).coordinate}"
             diff_coord = f"{audit.title}!{sheet.cell(diff_label.row, diff_label.column + 1).coordinate}"
             if moh_label is None:
-                moh, moh_coord = Decimal(0), ""
+                income_check = result("收入合计=审核计税收入", income, taxable,
+                                      {"审核计税收入": taxable_coord})
             else:
                 moh_coord = f"{audit.title}!{sheet.cell(moh_label.row, moh_label.column + 1).coordinate}"
                 try:
                     moh = number(moh_label.row, moh_label.column + 1)
                 except ConfigError:
                     moh = Decimal(0)
+                income_check = result("收入合计=审核计税收入+MOH", income, taxable + moh,
+                                      {"审核计税收入": taxable_coord, "MOH": moh_coord})
         finally:
             sheet = original
         return [result("税额合计=借项汇总", tax, debit,
                        {"税额合计": sheet.cell(total.row, bu_col+2).coordinate, "借项行": debit_rows}),
-                result("收入合计=审核计税收入+MOH", income, taxable + moh,
-                       {"审核计税收入": taxable_coord, "MOH": moh_coord}),
+                income_check,
                 result("审核差额=0", difference, Decimal(0), {"差额": diff_coord}),
                 result("Check合计=Check明细汇总", check_total, check_details, {"Check明细行": check_rows})]
     return [result("税额合计=借项汇总", tax, debit,

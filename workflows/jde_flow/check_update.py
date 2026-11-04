@@ -21,7 +21,6 @@ def update_from_check(book, include_children=False):
     if len({(a, d) for _, a, d in conditions}) != len(conditions):
         raise ConfigError('Check 筛选条件重复')
     totals = defaultdict(Decimal)
-    refs = defaultdict(list)
     records = []
     end = max(ledger.max_row, 2)
     ranges = {key: f"JDE明细账!${ledger.cell(1, cols[key]).column_letter}$2:${ledger.cell(1, cols[key]).column_letter}${end}"
@@ -47,7 +46,6 @@ def update_from_check(book, include_children=False):
             amount += value
         key = (account.split('.')[0], doc)
         totals[key] += amount
-        refs[key].append(r)
         ar = f"TRIM({ranges['帐号']})"
         match = f'({ar}=TRIM(O{r}))'
         if include_children:
@@ -80,7 +78,7 @@ def update_from_check(book, include_children=False):
     new_rows = defaultdict(list)
     for row, ((bu, doc), amount) in enumerate(totals.items(), 9):
         sheet.cell(row, 2).value = int(bu) if bu.isdigit() else bu
-        sheet.cell(row, 3).value = '=-SUM(' + ','.join(f'P{r}' for r in refs[bu, doc]) + ')'
+        sheet.cell(row, 3).value = -float(amount)
         new_rows[bu].append(row)
     if fixed is not None:
         sheet.cell(fixed, 2).value = 250108

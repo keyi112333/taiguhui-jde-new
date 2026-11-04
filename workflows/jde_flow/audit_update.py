@@ -33,13 +33,12 @@ def update_audit(book, calc_total):
         raise ConfigError('R55GL1005 表头结构与示例不符')
     if [norm(source.cell(header, c).value) for c in (7, 8)] != ['Debits', 'Credits']:
         raise ConfigError('R55GL1005 缺少本期借贷列')
-    # 按 Account Description 逐行记录原模板样式（含蓝色/黄色填充），
-    # 插入新的未分类科目后仍按科目说明精确对应，避免填充色错行。
+    # 使用完整科目标识跟踪分类和样式，避免插入行后蓝色区域错位。
     known = {}
     base_styles = None
     for r in range(8, target.max_row + 1):
         if target.cell(r, 6).value is not None:
-            key = norm(target.cell(r, 6).value)
+            key = tuple(norm(target.cell(r, c).value) for c in (3, 4, 5, 6))
             styles = [copy(target.cell(r, c)._style) for c in range(2, 10)]
             known[key] = styles
             if base_styles is None:
@@ -59,11 +58,12 @@ def update_audit(book, calc_total):
                 groups[desc] = 8 + len(selected)
         if active and desc:
             values = [source.cell(r, c).value for c in (1, 2, 3, 4, 5, 7, 8)]
-            if desc not in known:
-                unclassified.append(tuple(norm(v) for v in values[1:5]))
+            key = tuple(norm(v) for v in values[1:5])
+            if key not in known:
+                unclassified.append(key)
                 selected.append((values, base_styles, True))
             else:
-                selected.append((values, known[desc], False))
+                selected.append((values, known[key], False))
     if set(groups) != {'主营业务收入', '其他业务收入'}:
         raise ConfigError('R55GL1005 缺少主营业务收入或其他业务收入分组')
     for r in range(8, max(target.max_row, 7 + len(selected)) + 1):
@@ -90,9 +90,7 @@ def update_audit(book, calc_total):
     for r, desc in ((8, '主营业务收入'), (9, '其他业务收入')):
         target.cell(r, 13).value = f'=F{groups[desc]}'
         target.cell(r, 14).value = f'=I{groups[desc]}'
-    target['N10'] = '=SUM(蓝色)'
     target['N11'] = '=N8+N9-N10'
-    target['N12'] = '=LOOKUP($D$4,MOH!$E$6:$AF$6,MOH!$E$7:$AF$7)'
     target['N14'] = f"=N11+N12-'房产税（从租）计算底稿'!C{calc_total}"
     target['D4'] = "='房产税（从租）计算底稿'!C4"
     if unclassified:

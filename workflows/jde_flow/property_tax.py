@@ -453,6 +453,19 @@ def save_with_openpyxl(book, path, links):
             temp_path.unlink()
 
 
+def _zero_amount(value):
+    """金额为空、空串或数值 0 时视为零，用于分录区跳过借贷皆为 0 的行。"""
+    if value is None:
+        return True
+    text = str(value).strip()
+    if not text:
+        return True
+    try:
+        return float(text) == 0
+    except ValueError:
+        return False
+
+
 class PropertyTaxFlow:
     def __init__(self, context):
         self.context = context
@@ -790,10 +803,14 @@ class PropertyTaxFlow:
                 code = sheet.cell(row, columns["账号"]).value
                 if code is None or not str(code).strip():
                     continue
+                debit = sheet.cell(row, columns["借项金额"]).value
+                credit = sheet.cell(row, columns["贷项金额"]).value
+                if _zero_amount(debit) and _zero_amount(credit):
+                    continue
                 rows.append((
                     str(code).strip(),
-                    sheet.cell(row, columns["借项金额"]).value,
-                    sheet.cell(row, columns["贷项金额"]).value,
+                    debit,
+                    credit,
                     sheet.cell(row, columns["备注"]).value,
                 ))
             if not rows:

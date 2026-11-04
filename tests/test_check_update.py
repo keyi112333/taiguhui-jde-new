@@ -19,9 +19,9 @@ class CheckUpdateTests(unittest.TestCase):
         self.assertEqual(len(records), 11)
         self.assertEqual(note, "")
         s = b['房产税（从租）计算底稿']
-        self.assertEqual(s['C9'].value, '=-SUM(P5)')
-        self.assertEqual(s['C10'].value, '=-SUM(P6)')
-        self.assertEqual(s['C11'].value, '=-SUM(P7,P8,P9,P10)')
+        self.assertEqual(s['C9'].value, 11404425.82)
+        self.assertEqual(s['C10'].value, 13126432.18)
+        self.assertEqual(s['C11'].value, 71050771.32)
         self.assertEqual(s['M6'].value, '非JE')
         self.assertIn('<>MID(M6,2,99)', s['P6'].value)
         self.assertEqual(s['H8'].value, '=$D$9+$D$10+$D$11')
