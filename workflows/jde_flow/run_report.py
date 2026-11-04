@@ -13,9 +13,9 @@ from log.loggingConfig import logger
 RESULT_FILE_TEMPLATE = "房产税计税表更新与分录录入运行结果表-{year}.xlsx"
 RESULT_HEADERS = (
     "会计期间", "公司", "公司代码", "分录批号",
-    "运行结果", "异常情况", "运行开始时间", "运行结束时间",
+    "运行结果", "异常情况", "备注", "运行开始时间", "运行结束时间",
 )
-RESULT_WIDTHS = (12, 16, 12, 20, 14, 40, 20, 20)
+RESULT_WIDTHS = (12, 16, 12, 20, 14, 40, 60, 20, 20)
 NOTIFY_SHEET = "通知配置"
 ITEM_KEY = "配置项"
 VALUE_KEY = "值"
@@ -58,8 +58,9 @@ def append_run_result(config, record, year=None):
     values = [record.get(header) for header in RESULT_HEADERS]
     sheet.append(["" if value is None else value for value in values])
     row = sheet.max_row
-    sheet.cell(row, 6).alignment = Alignment(vertical="top", wrap_text=True)
-    for column in (7, 8):
+    for column in (6, 7):
+        sheet.cell(row, column).alignment = Alignment(vertical="top", wrap_text=True)
+    for column in (8, 9):
         sheet.cell(row, column).number_format = "yyyy/m/d h:mm:ss"
     sheet.auto_filter.ref = f"A1:{get_column_letter(len(RESULT_HEADERS))}{row}"
     book.save(path)

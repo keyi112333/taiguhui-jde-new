@@ -109,7 +109,8 @@ def update_from_check(book, include_children=False):
                 old = int(m[2])
                 return m[0] if old not in relocation else (m[1] + str(relocation[old]) if relocation[old] else '0')
             cell.value = re.sub(r'(\$?D\$?)(\d+)\b', move, cell.value)
+    audit_note = ""
     if 'R55GL1005' in book.sheetnames:
         from workflows.jde_flow.audit_update import update_audit
-        update_audit(book, total)
-    return records
+        audit_note = update_audit(book, total) or ""
+    return records, audit_note

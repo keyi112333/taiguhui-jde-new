@@ -1,7 +1,11 @@
 """从 R55GL1005 的 Cat23 分组构建审核底稿。"""
 from copy import copy
+from openpyxl.styles import PatternFill
 from openpyxl.workbook.defined_name import DefinedName
 from config.config_loader import ConfigError
+
+
+NO_FILL = PatternFill(fill_type=None)
 
 
 def norm(value):
@@ -31,11 +35,16 @@ def update_audit(book, calc_total):
         raise ConfigError('R55GL1005 缺少本期借贷列')
     # 使用完整科目标识跟踪分类和样式，避免插入行后蓝色区域错位。
     known = {}
+    base_styles = None
     for r in range(8, target.max_row + 1):
         if target.cell(r, 6).value is not None:
             key = tuple(norm(target.cell(r, c).value) for c in (3, 4, 5, 6))
-            known[key] = [copy(target.cell(r, c)._style) for c in range(2, 10)]
+            styles = [copy(target.cell(r, c)._style) for c in range(2, 10)]
+            known[key] = styles
+            if base_styles is None:
+                base_styles = styles
     selected = []
+    unclassified = []
     active = False
     groups = {}
     for r in range(header + 1, source.max_row + 1):
@@ -51,19 +60,25 @@ def update_audit(book, calc_total):
             values = [source.cell(r, c).value for c in (1, 2, 3, 4, 5, 7, 8)]
             key = tuple(norm(v) for v in values[1:5])
             if key not in known:
-                raise ConfigError(f'审核底稿出现未分类科目，请先复核计税分类：{key}')
-            selected.append((values, known[key]))
+                unclassified.append(key)
+                selected.append((values, base_styles, True))
+            else:
+                selected.append((values, known[key], False))
     if set(groups) != {'主营业务收入', '其他业务收入'}:
         raise ConfigError('R55GL1005 缺少主营业务收入或其他业务收入分组')
     for r in range(8, max(target.max_row, 7 + len(selected)) + 1):
         for c in range(2, 10):
             target.cell(r, c).value = None
     blue = []
-    for r, (values, styles) in enumerate(selected, 8):
+    for r, (values, styles, is_new) in enumerate(selected, 8):
         for c, value in enumerate(values, 2):
             target.cell(r, c).value = value
-        for c, style in enumerate(styles, 2):
-            target.cell(r, c)._style = copy(style)
+        style_row = styles if styles is not None else [None] * 8
+        for c, style in enumerate(style_row, 2):
+            if style is not None:
+                target.cell(r, c)._style = copy(style)
+            if is_new:
+                target.cell(r, c).fill = NO_FILL
         target.cell(r, 9).value = f'=H{r}-G{r}'
         color = target.cell(r, 9).fill.fgColor
         if color.type == 'rgb' and color.rgb == 'FF00B0F0':
@@ -80,3 +95,7 @@ def update_audit(book, calc_total):
     target['N12'] = '=LOOKUP($D$4,MOH!$E$6:$AF$6,MOH!$E$7:$AF$7)'
     target['N14'] = f"=N11+N12-'房产税（从租）计算底稿'!C{calc_total}"
     target['D4'] = "='房产税（从租）计算底稿'!C4"
+    if unclassified:
+        items = "、".join(str(key) for key in unclassified)
+        return f"审核底稿出现未分类科目，请先复核计税分类：{items}"
+    return ""

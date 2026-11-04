@@ -708,7 +708,8 @@ class PropertyTaxFlow:
                             target_cell.comment = source_cell.comment
             finally:
                 report.close()
-            records = update_workbook(book, include_children=mode == "包含子科目")
+            records, audit_note = update_workbook(book, include_children=mode == "包含子科目")
+            self.context.set("property_tax_audit_note", audit_note)
             declaration = update_declaration(book, self.accounting_period())
             book.calculation = CalcProperties(fullCalcOnLoad=True, forceFullCalc=True)
             blue = book.defined_names["蓝色"].attr_text if "蓝色" in book.defined_names else None

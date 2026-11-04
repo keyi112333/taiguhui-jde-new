@@ -77,6 +77,7 @@ class JDEMainTask(TaskBase):
             result, error = "成功", ""
             self.context.set("property_tax_status", None)
             self.context.set("property_tax_pending_reason", None)
+            self.context.set("property_tax_audit_note", None)
             self.context.set("jde_journal_batch", None)
             try:
                 info = self.prepare(run)
@@ -110,6 +111,7 @@ class JDEMainTask(TaskBase):
                     "分录批号": batch,
                     "运行结果": result,
                     "异常情况": error,
+                    "备注": self.context.get("property_tax_audit_note") or "",
                     "运行开始时间": started,
                     "运行结束时间": datetime.now(),
                 }
