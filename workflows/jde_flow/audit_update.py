@@ -33,12 +33,13 @@ def update_audit(book, calc_total):
         raise ConfigError('R55GL1005 表头结构与示例不符')
     if [norm(source.cell(header, c).value) for c in (7, 8)] != ['Debits', 'Credits']:
         raise ConfigError('R55GL1005 缺少本期借贷列')
-    # 使用完整科目标识跟踪分类和样式，避免插入行后蓝色区域错位。
+    # 按 Account Description 逐行记录原模板样式（含蓝色/黄色填充），
+    # 插入新的未分类科目后仍按科目说明精确对应，避免填充色错行。
     known = {}
     base_styles = None
     for r in range(8, target.max_row + 1):
         if target.cell(r, 6).value is not None:
-            key = tuple(norm(target.cell(r, c).value) for c in (3, 4, 5, 6))
+            key = norm(target.cell(r, 6).value)
             styles = [copy(target.cell(r, c)._style) for c in range(2, 10)]
             known[key] = styles
             if base_styles is None:
@@ -58,12 +59,11 @@ def update_audit(book, calc_total):
                 groups[desc] = 8 + len(selected)
         if active and desc:
             values = [source.cell(r, c).value for c in (1, 2, 3, 4, 5, 7, 8)]
-            key = tuple(norm(v) for v in values[1:5])
-            if key not in known:
-                unclassified.append(key)
+            if desc not in known:
+                unclassified.append(tuple(norm(v) for v in values[1:5]))
                 selected.append((values, base_styles, True))
             else:
-                selected.append((values, known[key], False))
+                selected.append((values, known[desc], False))
     if set(groups) != {'主营业务收入', '其他业务收入'}:
         raise ConfigError('R55GL1005 缺少主营业务收入或其他业务收入分组')
     for r in range(8, max(target.max_row, 7 + len(selected)) + 1):
