@@ -71,7 +71,9 @@ def update_from_check(book, include_children=False):
         if text(sheet.cell(r, 2).value):
             old_rows[text(sheet.cell(r, 2).value)].append(r)
     styles = [copy(sheet.cell(9, c)._style) for c in (2, 3, 4)]
-    total = 9 + len(totals) + 2
+    has_fixed = '250108' in old_rows
+    fixed = 9 + len(totals) if has_fixed else None
+    total = 9 + len(totals) + (2 if has_fixed else 0)
     for row in range(9, max(total, old_total) + 1):
         for col in (2, 3, 4):
             sheet.cell(row, col).value = None
@@ -80,11 +82,12 @@ def update_from_check(book, include_children=False):
         sheet.cell(row, 2).value = int(bu) if bu.isdigit() else bu
         sheet.cell(row, 3).value = '=-SUM(' + ','.join(f'P{r}' for r in refs[bu, doc]) + ')'
         new_rows[bu].append(row)
-    fixed = 9 + len(totals)
-    sheet.cell(fixed, 2).value = 250108
-    sheet.cell(fixed, 3).value = '=LOOKUP($C$4,MOH!$E$6:$AF$6,MOH!$E$7:$AF$7)'
-    new_rows['250108'].append(fixed)
-    for r in range(9, fixed + 1):
+    if fixed is not None:
+        sheet.cell(fixed, 2).value = 250108
+        sheet.cell(fixed, 3).value = '=LOOKUP($C$4,MOH!$E$6:$AF$6,MOH!$E$7:$AF$7)'
+        new_rows['250108'].append(fixed)
+    last_data = fixed if fixed is not None else (9 + len(totals) - 1)
+    for r in range(9, last_data + 1):
         for col, style in zip((2, 3, 4), styles):
             sheet.cell(r, col)._style = copy(style)
         sheet.cell(r, 4).value = f'=ROUND(C{r}*$C$8,2)'

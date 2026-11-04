@@ -374,9 +374,13 @@ def check_sheet(sheet, tolerance="0.00", audit=None):
     total = unique([sheet.cell(r, bu_col) for r in range(bu_header.row + 1, sheet.max_row + 1)
                     if label(sheet.cell(r, bu_col).value) == "合计"], "收入/税额合计行")
     income, tax = number(total.row, bu_col + 1), number(total.row, bu_col + 2)
-    fixed = unique([sheet.cell(r, bu_col) for r in range(bu_header.row + 1, total.row)
-                    if label(sheet.cell(r, bu_col).value) == "250108"], "固定 BU 250108 行")
-    number(fixed.row, bu_col + 1)
+    fixed_cells = [sheet.cell(r, bu_col) for r in range(bu_header.row + 1, total.row)
+                   if label(sheet.cell(r, bu_col).value) == "250108"]
+    if len(fixed_cells) > 1:
+        raise ConfigError(f"无法唯一定位固定 BU 250108 行：找到 {len(fixed_cells)} 处")
+    fixed = fixed_cells[0] if fixed_cells else None
+    if fixed is not None:
+        number(fixed.row, bu_col + 1)
     _, journal_columns, region_rows = journal_region(sheet)
     debit_column = journal_columns["借项金额"]
     debit_rows = []
@@ -417,20 +421,36 @@ def check_sheet(sheet, tolerance="0.00", audit=None):
         original = sheet
         try:
             sheet = audit
-            taxable, moh = number(11, 14), number(12, 14)
-            difference = number(14, 14)
+
+            def audit_label_cell(label_text):
+                cells = [c for row in sheet.iter_rows() for c in row
+                         if label(c.value) == label_text]
+                if len(cells) != 1:
+                    raise ConfigError(f"无法唯一定位审核底稿「{label_text}」：找到 {len(cells)} 处")
+                return cells[0]
+
+            taxable_label = audit_label_cell("计算房产税-从租科目")
+            moh_label = audit_label_cell("MOH")
+            diff_label = audit_label_cell("Diff")
+            taxable = number(taxable_label.row, taxable_label.column + 1)
+            moh = number(moh_label.row, moh_label.column + 1)
+            difference = number(diff_label.row, diff_label.column + 1)
+            taxable_coord = f"{audit.title}!{sheet.cell(taxable_label.row, taxable_label.column + 1).coordinate}"
+            moh_coord = f"{audit.title}!{sheet.cell(moh_label.row, moh_label.column + 1).coordinate}"
+            diff_coord = f"{audit.title}!{sheet.cell(diff_label.row, diff_label.column + 1).coordinate}"
         finally:
             sheet = original
         return [result("税额合计=借项汇总", tax, debit,
                        {"税额合计": sheet.cell(total.row, bu_col+2).coordinate, "借项行": debit_rows}),
                 result("收入合计=审核计税收入+MOH", income, taxable + moh,
-                       {"审核计税收入": audit.title + "!N11", "MOH": audit.title + "!N12"}),
-                result("审核差额=0", difference, Decimal(0), {"差额": audit.title + "!N14"}),
+                       {"审核计税收入": taxable_coord, "MOH": moh_coord}),
+                result("审核差额=0", difference, Decimal(0), {"差额": diff_coord}),
                 result("Check合计=Check明细汇总", check_total, check_details, {"Check明细行": check_rows})]
     return [result("税额合计=借项汇总", tax, debit,
                    {"税额合计": sheet.cell(total.row, bu_col+2).coordinate, "借项行": debit_rows}),
             result("收入合计=Check取反", income, -check_total,
                    {"收入合计": sheet.cell(total.row, bu_col+1).coordinate,
-                    "固定BU": fixed.coordinate, "Check合计": check_total_row.coordinate}),
+                    "固定BU": fixed.coordinate if fixed is not None else "",
+                    "Check合计": check_total_row.coordinate}),
             result("Check合计=Check明细汇总", check_total, check_details,
                    {"Check明细行": check_rows})]

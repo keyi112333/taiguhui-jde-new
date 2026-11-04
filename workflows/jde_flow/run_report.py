@@ -10,7 +10,7 @@ from openpyxl.utils import get_column_letter
 from log.loggingConfig import logger
 
 
-RESULT_FILE_TEMPLATE = "房产税计税表更新与分录录入运行结果表-{year}.xlsx"
+RESULT_FILE_TEMPLATE = "房产税计税表运行结果表-{year}.xlsx"
 RESULT_HEADERS = (
     "会计期间", "公司", "公司代码", "分录批号",
     "运行结果", "异常情况", "备注", "运行开始时间", "运行结束时间",
